@@ -201,7 +201,7 @@ export class PiRpc {
     }
   }
 
-  async respondToUi(id: string, response: { confirmed?: boolean; value?: string; cancelled?: boolean }): Promise<void> {
+  async respondToUi(id: string, response: { confirmed?: boolean; value?: string; cancelled?: boolean; timedOut?: boolean }): Promise<void> {
     this.write({ type: "extension_ui_response", id, ...response });
   }
 

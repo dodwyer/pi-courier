@@ -2,16 +2,20 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
+import { ActivityRenderer } from "./activity-renderer.js";
 
 const socketPath = process.env.PI_COURIER_SOCKET ?? "/run/omp-courier/control.sock";
 
 interface ControlResponse {
   ok: boolean;
   error?: string;
+  activity?: {
+    frame?: Record<string, unknown>;
+  };
   [key: string]: unknown;
 }
 
-async function request(command: Record<string, unknown>, stream = false): Promise<ControlResponse[]> {
+async function request(command: Record<string, unknown>, renderer?: ActivityRenderer): Promise<ControlResponse[]> {
   return new Promise((resolve, reject) => {
     const responses: ControlResponse[] = [];
     const socket = net.createConnection(socketPath);
@@ -33,12 +37,16 @@ async function request(command: Record<string, unknown>, stream = false): Promis
           return;
         }
         responses.push(response);
-        if (stream) renderActivity(response);
+        renderer?.render(response);
       }
     });
-    socket.once("end", () => resolve(responses));
-    if (stream) {
+    socket.once("end", () => {
+      renderer?.flush();
+      resolve(responses);
+    });
+    if (renderer) {
       process.once("SIGINT", () => {
+        renderer.flush();
         socket.end();
         resolve(responses);
       });
@@ -64,14 +72,17 @@ async function main(): Promise<void> {
       console.log(JSON.stringify((await request({ command: "adopt", workspace }))[0], null, 2));
       return;
     case "watch":
+      if (!workspace || rest.some((argument) => argument !== "--raw")) {
+        throw new Error("Usage: courierctl watch <workspace> [--raw]");
+      }
       console.log(`Watching ${workspace}. Press Ctrl+C to stop.\n`);
-      await request({ command: "watch", workspace }, true);
+      await request({ command: "watch", workspace }, new ActivityRenderer({ raw: rest.includes("--raw") }));
       return;
     case "attach":
       await attach(workspace, rest.includes("--abort"));
       return;
     default:
-      console.log("Usage: courierctl list | status <workspace> | watch <workspace> | attach <workspace> [--abort] | adopt <workspace>");
+      console.log("Usage: courierctl list | status <workspace> | watch <workspace> [--raw] | attach <workspace> [--abort] | adopt <workspace>");
       process.exitCode = 2;
   }
 }
@@ -105,35 +116,6 @@ async function attach(workspace: string | undefined, abort: boolean): Promise<vo
     if (result.status !== 0) process.exitCode = result.status ?? 1;
   } finally {
     await request({ command: "release", workspace });
-  }
-}
-
-function renderActivity(response: ControlResponse): void {
-  const activity = response.activity as { frame?: Record<string, unknown> } | undefined;
-  const frame = activity?.frame;
-  if (!frame) return;
-  switch (frame.type) {
-    case "message_update": {
-      const event = frame.assistantMessageEvent as Record<string, unknown> | undefined;
-      const delta = event?.delta ?? event?.text ?? event?.thinking;
-      if (delta) process.stdout.write(String(delta));
-      return;
-    }
-    case "tool_execution_start":
-      process.stdout.write(`\n\x1b[36m🔧 ${String(frame.toolName ?? "tool")}\x1b[0m\n`);
-      return;
-    case "tool_execution_end":
-      process.stdout.write(`\x1b[2m${frame.isError ? "tool failed" : "tool complete"}\x1b[0m\n`);
-      return;
-    case "turn_start":
-      process.stdout.write("\n\x1b[1mOMP\x1b[0m\n");
-      return;
-    case "turn_end":
-    case "agent_end":
-      process.stdout.write("\n");
-      return;
-    case "process_stderr":
-      process.stderr.write(`\x1b[33m${String(frame.message)}\x1b[0m\n`);
   }
 }
 
