@@ -17,6 +17,7 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 - Each thread selects an OMP profile and workspace.
 - A workspace can have only one active Matrix or SSH owner.
 - Idle workers stop after a configurable timeout; their files and native OMP session remain.
+- User and assistant text is mirrored to `.courier/transcript.md` inside each workspace for SSH review.
 - `courierctl watch` observes RPC events concurrently.
 - `courierctl attach` pauses Matrix ownership and resumes the exact session in OMP's native TUI.
 
@@ -38,6 +39,12 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 ```
 
 A top-level `!start` or `!continue` message becomes the Matrix thread root. Send later prompts as replies in that thread.
+
+## Workspace output and transcripts
+
+OMP runs with the selected workspace as its current directory, so requested reports, code, and other deliverables are written under `/srv/threads/<name>`. Courier also appends a human-readable conversation mirror to `.courier/transcript.md`. The `.courier` directory is excluded from Git, and external Git workspaces use their local `.git/info/exclude` rather than a tracked ignore change.
+
+The mirror contains Matrix user text and OMP assistant text with timestamps. It deliberately excludes hidden reasoning, raw tool results, tool arguments, and approval payloads. Text deliberately pasted into the conversation may still be sensitive. Protected OMP session JSONL under Courier's state directory remains authoritative for resume and native TUI attach.
 
 ## Configuration
 

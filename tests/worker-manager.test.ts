@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,7 +27,11 @@ rl.on("line", line => {
   } else if (frame.type === "prompt") {
     process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{agentInvoked:true}})+"\\n");
     process.stdout.write(JSON.stringify({type:"turn_start"})+"\\n");
-    process.stdout.write(JSON.stringify({type:"turn_end",message:{role:"assistant",content:[{type:"text",text:"reply:"+frame.message}]}})+"\\n");
+    process.stdout.write(JSON.stringify({type:"turn_end",message:{role:"assistant",content:[
+      {type:"text",text:"reply:"+frame.message},
+      {type:"thinking",text:"hidden reasoning"},
+      {type:"toolCall",name:"secret_tool",arguments:{token:"raw-tool-secret"}}
+    ]}})+"\\n");
     process.stdout.write(JSON.stringify({type:"agent_end"})+"\\n");
   } else if (frame.type === "abort") {
     process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true})+"\\n");
@@ -58,9 +63,22 @@ rl.on("line", line => {
     await manager.prompt({ ...first, threadRootId: firstRecord.rootEventId }, "alpha");
     await manager.prompt({ ...second, threadRootId: secondRecord.rootEventId }, "beta");
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(replies).toContainEqual({ workspace: "nomadmade", text: "reply:alpha" });
-    expect(replies).toContainEqual({ workspace: "another-topic", text: "reply:beta" });
+    expect(replies.some((reply) => reply.workspace === "nomadmade" && reply.text.startsWith("reply:alpha"))).toBe(true);
+    expect(replies.some((reply) => reply.workspace === "another-topic" && reply.text.startsWith("reply:beta"))).toBe(true);
     expect(firstRecord.sessionDir).not.toBe(secondRecord.sessionDir);
+    const firstTranscript = readFileSync(join(firstRecord.workspacePath, ".courier", "transcript.md"), "utf-8");
+    const secondTranscript = readFileSync(join(secondRecord.workspacePath, ".courier", "transcript.md"), "utf-8");
+    expect(firstTranscript).toContain("Human-readable Matrix conversation mirror");
+    expect(firstTranscript).toContain("**Sender:** `@david:example.com`");
+    expect(firstTranscript).toContain("alpha");
+    expect(firstTranscript).toContain("reply:alpha");
+    expect(firstTranscript).not.toContain("hidden reasoning");
+    expect(firstTranscript).not.toContain("raw-tool-secret");
+    expect(firstTranscript).not.toContain("secret_tool");
+    expect(firstTranscript).not.toContain("beta");
+    expect(secondTranscript).toContain("beta");
+    expect(statSync(join(firstRecord.workspacePath, ".courier", "transcript.md")).mode & 0o777).toBe(0o600);
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: firstRecord.workspacePath, encoding: "utf-8" })).toBe("");
     await manager.shutdown();
   });
 });
