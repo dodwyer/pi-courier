@@ -1,34 +1,32 @@
 /**
- * PiRpc — thin wrapper around the official RpcClient from @earendil-works/pi-coding-agent.
+ * Direct Oh My Pi RPC process adapter.
  *
- * Responsibilities:
- *  - Locate the pi CLI (config/env/PATH) and spawn it in --mode rpc
- *  - Retry startup handshake (cold start can take a moment)
- *  - Provide typed convenience methods used by the command map
- *  - Cache get_commands results briefly
- *  - Fall back to steer() when a prompt arrives while the agent is streaming
+ * OMP is a compiled executable. Unlike upstream Pi's RpcClient it must be
+ * spawned directly, not as `node <cliPath>`. The adapter deliberately keeps
+ * the wire types local so courier releases can pin and smoke-test an OMP
+ * version without taking a runtime dependency on OMP's package internals.
  */
-import { execFileSync } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  type ModelInfo,
-  RpcClient,
-  type RpcEventListener,
-  type RpcSessionState,
-} from "@earendil-works/pi-coding-agent";
+import * as readline from "node:readline";
+import { logger } from "../logger.js";
 
-export interface PiRpcOptions {
-  /** Absolute path to pi's dist/cli.js (default: PI_CLI_PATH env, local node_modules, or `which pi` resolved) */
-  cliPath?: string;
-  /** Working directory for the agent (affects bash tool, project context) */
-  cwd?: string;
-  /** Extra CLI args, e.g. ["--session-dir", "/path"] */
-  args?: string[];
+export interface RpcModelInfo {
+  id: string;
+  provider: string;
+  name?: string;
 }
 
-/** Minimal shape of a slash command returned by get_commands (duck-typed, not exported by the package) */
+export interface RpcSessionState {
+  model?: RpcModelInfo;
+  sessionId?: string;
+  sessionFile?: string;
+  sessionName?: string;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  [key: string]: unknown;
+}
+
 export interface RpcSlashCommandInfo {
   name: string;
   description?: string;
@@ -37,217 +35,268 @@ export interface RpcSlashCommandInfo {
   path?: string;
 }
 
-export class PiRpc {
-  private client?: RpcClient;
-  private commandsCache?: { at: number; list: RpcSlashCommandInfo[] };
-  private options: PiRpcOptions;
-  /** Listeners registered before start() — attached once the client connects */
-  private listeners: Array<RpcEventListener | undefined> = [];
+export interface RpcFrame {
+  type: string;
+  id?: string;
+  command?: string;
+  success?: boolean;
+  data?: unknown;
+  error?: string;
+  [key: string]: unknown;
+}
 
-  constructor(options: PiRpcOptions = {}) {
-    this.options = options;
-  }
+export type RpcEventListener = (frame: RpcFrame) => void;
+
+export interface PiRpcOptions {
+  cliPath?: string;
+  cwd: string;
+  args?: string[];
+  env?: NodeJS.ProcessEnv;
+  startupTimeoutMs?: number;
+  requestTimeoutMs?: number;
+}
+
+interface PendingRequest {
+  command: string;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+export class PiRpc {
+  private child?: ChildProcessWithoutNullStreams;
+  private readonly listeners = new Set<RpcEventListener>();
+  private readonly pending = new Map<string, PendingRequest>();
+  private nextRequest = 1;
+
+  constructor(private readonly options: PiRpcOptions) {}
 
   get isConnected(): boolean {
-    return this.client !== undefined;
+    return this.child !== undefined && this.child.exitCode === null;
   }
 
-  /** Locate the pi CLI entry point. */
-  static async resolveCliPath(): Promise<string> {
-    // 1. Explicit env override
-    if (process.env.PI_CLI_PATH) return process.env.PI_CLI_PATH;
-
-    // 2. System-installed pi (`which pi`, resolve symlink to dist/cli.js).
-    //    Preferred: pi is installed independently and upgraded on its own.
+  static resolveCliPath(explicit?: string): string {
+    if (explicit) return explicit;
+    if (process.env.OMP_CLI_PATH) return process.env.OMP_CLI_PATH;
     try {
-      const bin = execFileSync("which", ["pi"], { encoding: "utf-8" }).trim();
-      if (bin) {
-        return fs.realpathSync(bin);
-      }
+      const binary = execFileSync("which", ["omp"], { encoding: "utf-8" }).trim();
+      if (binary) return fs.realpathSync(binary);
     } catch {
-      // fall through
+      // Fall through to the actionable error below.
     }
-
-    // 3. Local node_modules copy (dev setup / peer auto-install). The package
-    //    exports block subpath resolution, so resolve the entry and derive
-    //    dist/cli.js from its directory.
-    try {
-      const entryUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-      const entry = fileURLToPath(entryUrl);
-      return path.join(path.dirname(entry), "cli.js");
-    } catch {
-      // fall through
-    }
-
-    throw new Error(
-      "Cannot locate the pi CLI. Install @earendil-works/pi-coding-agent globally (npm i -g @earendil-works/pi-coding-agent) or set PI_CLI_PATH."
-    );
+    throw new Error("Cannot locate omp. Set ompCliPath or OMP_CLI_PATH to the compiled OMP executable.");
   }
 
   async start(): Promise<void> {
-    if (this.client) return;
+    if (this.isConnected) return;
+    fs.mkdirSync(this.options.cwd, { recursive: true });
 
-    // The workdir becomes the pi child process's cwd; spawn requires it to
-    // exist, so create it on demand.
-    if (this.options.cwd) {
-      fs.mkdirSync(this.options.cwd, { recursive: true });
-    }
-
-    const cliPath = this.options.cliPath ?? (await PiRpc.resolveCliPath());
-    const client = new RpcClient({
-      cliPath,
+    const cliPath = PiRpc.resolveCliPath(this.options.cliPath);
+    const args = ["--mode", "rpc-ui", ...(this.options.args ?? [])];
+    const child = spawn(cliPath, args, {
       cwd: this.options.cwd,
-      args: this.options.args,
+      env: { ...process.env, ...this.options.env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.child = child;
+
+    const lines = readline.createInterface({ input: child.stdout });
+    let ready = false;
+    let readyResolve: (() => void) | undefined;
+    let readyReject: ((error: Error) => void) | undefined;
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
     });
 
-    await client.start();
-
-    // Attach any listeners that were registered before the client connected
-    for (const listener of this.listeners) {
-      if (listener) client.onEvent(listener);
-    }
-
-    // Cold start handshake: the process may need a moment before answering.
-    // 15 attempts x 2s backoff (up to ~30s): cold starts load models and
-    // extensions, which can exceed a short timeout on slow VPSs/debians.
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= 15; attempt++) {
+    lines.on("line", (line) => {
+      if (!line.trim()) return;
+      let frame: RpcFrame;
       try {
-        await client.getState();
-        this.client = client;
-        return;
+        frame = JSON.parse(line) as RpcFrame;
       } catch (err) {
-        lastError = err;
-        await new Promise((r) => setTimeout(r, 2000));
+        logger.warn(`[omp-rpc] ignoring non-JSON stdout: ${line.slice(0, 300)} (${(err as Error).message})`);
+        return;
       }
+      if (frame.type === "ready") {
+        ready = true;
+        readyResolve?.();
+        this.emit(frame);
+        return;
+      }
+      if (frame.type === "response" && frame.id) {
+        const pending = this.pending.get(frame.id);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pending.delete(frame.id);
+          if (frame.success === false) pending.reject(new Error(frame.error ?? `${pending.command} failed`));
+          else pending.resolve(frame.data);
+          return;
+        }
+      }
+      this.emit(frame);
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const message = chunk.toString("utf-8").trimEnd();
+      if (!message) return;
+      logger.warn(`[omp] ${message}`);
+      this.emit({ type: "process_stderr", message });
+    });
+
+    child.once("error", (err) => {
+      if (!ready) readyReject?.(err);
+      this.rejectPending(err);
+    });
+    child.once("exit", (code, signal) => {
+      const err = new Error(`omp exited (code=${code ?? "null"}, signal=${signal ?? "none"})`);
+      if (!ready) readyReject?.(err);
+      this.rejectPending(err);
+      this.emit({ type: "process_exit", code, signal });
+      this.child = undefined;
+      lines.close();
+    });
+
+    const timeoutMs = this.options.startupTimeoutMs ?? 30_000;
+    const timeout = setTimeout(() => readyReject?.(new Error(`omp RPC did not become ready within ${timeoutMs}ms`)), timeoutMs);
+    try {
+      await readyPromise;
+    } catch (err) {
+      child.kill("SIGTERM");
+      throw err;
+    } finally {
+      clearTimeout(timeout);
     }
-    await client.stop().catch(() => {});
-    throw new Error(`pi RPC did not become ready: ${(lastError as Error)?.message}`);
   }
 
   async stop(): Promise<void> {
-    if (!this.client) return;
-    await this.client.stop();
-    this.client = undefined;
-    this.commandsCache = undefined;
-    this.listeners = [];
+    const child = this.child;
+    if (!child) return;
+    this.child = undefined;
+    child.stdin.end();
+    child.kill("SIGTERM");
+    await Promise.race([
+      new Promise<void>((resolve) => child.once("exit", () => resolve())),
+      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+    ]);
+    if (child.exitCode === null) child.kill("SIGKILL");
   }
 
-  /**
-   * Restart the pi process. Keeps registered event listeners attached to the
-   * new process. The session persists on disk, so the same session is resumed.
-   * Useful after installing new extensions/skills or changing provider config.
-   */
   async restart(): Promise<void> {
-    const keptListeners = this.listeners;
     await this.stop();
-    this.listeners = keptListeners;
     await this.start();
   }
 
-  /**
-   * Send a user prompt. If the agent is streaming, the RPC server rejects a
-   * plain prompt — retry as a steering message (queued, delivered after the
-   * current tool calls finish).
-   */
-  async prompt(text: string): Promise<void> {
-    if (!this.client) throw new Error("pi RPC not connected");
-    try {
-      await this.client.prompt(text);
-    } catch (err) {
-      if (/streaming/i.test((err as Error).message)) {
-        await this.client.steer(text);
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  /** Subscribe to agent events. Safe to call before start(). Returns an unsubscribe function. */
   onEvent(listener: RpcEventListener): () => void {
-    const index = this.listeners.push(listener) - 1;
-    let clientUnsub: (() => void) | undefined;
-    if (this.client) {
-      clientUnsub = this.client.onEvent(listener);
-    }
-    return () => {
-      this.listeners[index] = undefined;
-      clientUnsub?.();
-    };
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
-  // =========================================================================
-  // RPC command conveniences (used by the slash command map)
-  // =========================================================================
+  async prompt(text: string): Promise<void> {
+    try {
+      await this.command("prompt", { message: text });
+    } catch (err) {
+      if (!/streaming/i.test((err as Error).message)) throw err;
+      await this.command("steer", { message: text });
+    }
+  }
+
+  async respondToUi(id: string, response: { confirmed?: boolean; value?: string; cancelled?: boolean }): Promise<void> {
+    this.write({ type: "extension_ui_response", id, ...response });
+  }
 
   async newSession(): Promise<{ cancelled: boolean }> {
-    return this.requireClient().newSession();
+    return (await this.command("new_session")) as { cancelled: boolean };
   }
 
   async compact(customInstructions?: string): Promise<{ summary: string; tokensBefore: number }> {
-    return this.requireClient().compact(customInstructions);
+    return (await this.command("compact", customInstructions ? { customInstructions } : {})) as {
+      summary: string;
+      tokensBefore: number;
+    };
   }
 
   async abort(): Promise<void> {
-    await this.requireClient().abort();
+    await this.command("abort");
   }
 
   async getState(): Promise<RpcSessionState> {
-    return this.requireClient().getState();
+    return (await this.command("get_state")) as RpcSessionState;
   }
 
-  async getAvailableModels(): Promise<ModelInfo[]> {
-    return this.requireClient().getAvailableModels();
+  async getAvailableModels(): Promise<RpcModelInfo[]> {
+    const data = (await this.command("get_available_models")) as RpcModelInfo[] | { models?: RpcModelInfo[] };
+    return Array.isArray(data) ? data : (data.models ?? []);
   }
 
   async setModel(provider: string, modelId: string): Promise<unknown> {
-    return this.requireClient().setModel(provider, modelId);
+    return this.command("set_model", { provider, modelId });
   }
 
   async setThinkingLevel(level: string): Promise<void> {
-    await this.requireClient().setThinkingLevel(level as never);
+    await this.command("set_thinking_level", { level });
   }
 
   async setSessionName(name: string): Promise<void> {
-    await this.requireClient().setSessionName(name);
+    await this.command("set_session_name", { name });
   }
 
-  async getSessionStats(): Promise<{
-    sessionId: string;
-    totalMessages: number;
-    cost: number;
-    tokens: { total: number };
-  }> {
-    return this.requireClient().getSessionStats();
+  async getSessionStats(): Promise<{ sessionId: string; totalMessages: number; cost: number; tokens: { total: number } }> {
+    return (await this.command("get_session_stats")) as {
+      sessionId: string;
+      totalMessages: number;
+      cost: number;
+      tokens: { total: number };
+    };
   }
 
   async exportHtml(outputPath?: string): Promise<{ path: string }> {
-    return this.requireClient().exportHtml(outputPath);
+    return (await this.command("export_html", outputPath ? { outputPath } : {})) as { path: string };
   }
 
   async bash(command: string): Promise<{ output: string; exitCode: number | undefined }> {
-    return this.requireClient().bash(command);
+    return (await this.command("bash", { command })) as { output: string; exitCode: number | undefined };
   }
 
   async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-    return this.requireClient().switchSession(sessionPath);
+    return (await this.command("switch_session", { sessionPath })) as { cancelled: boolean };
   }
 
-  /** Get available commands (extension commands, prompt templates, skills) with a short cache. */
   async getCommands(): Promise<RpcSlashCommandInfo[]> {
-    if (this.commandsCache && Date.now() - this.commandsCache.at < 60_000) {
-      return this.commandsCache.list;
-    }
-    const list = (await this.requireClient().getCommands()) as unknown as {
-      commands: RpcSlashCommandInfo[];
-    };
-    const commands = list.commands ?? [];
-    this.commandsCache = { at: Date.now(), list: commands };
-    return commands;
+    const data = (await this.command("get_commands")) as { commands?: RpcSlashCommandInfo[] } | RpcSlashCommandInfo[];
+    return Array.isArray(data) ? data : (data.commands ?? []);
   }
 
-  private requireClient(): RpcClient {
-    if (!this.client) throw new Error("pi RPC not connected");
-    return this.client;
+  private async command(type: string, fields: Record<string, unknown> = {}): Promise<unknown> {
+    if (!this.isConnected) throw new Error("omp RPC not connected");
+    const id = `courier_${this.nextRequest++}`;
+    const timeoutMs = this.options.requestTimeoutMs ?? 30_000;
+    const promise = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${type} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, { command: type, resolve, reject, timer });
+    });
+    this.write({ id, type, ...fields });
+    return promise;
+  }
+
+  private write(frame: Record<string, unknown>): void {
+    const child = this.child;
+    if (!child || child.stdin.destroyed) throw new Error("omp RPC stdin is unavailable");
+    child.stdin.write(`${JSON.stringify(frame)}\n`);
+  }
+
+  private emit(frame: RpcFrame): void {
+    for (const listener of this.listeners) listener(frame);
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 }

@@ -14,6 +14,12 @@ describe('config', () => {
     delete process.env.PI_SLACK_BOT_TOKEN;
     delete process.env.PI_SLACK_APP_TOKEN;
     delete process.env.PI_DISCORD_TOKEN;
+    delete process.env.PI_COURIER_CONFIG;
+    delete process.env.PI_COURIER_STATE_DIR;
+    delete process.env.PI_COURIER_SOCKET;
+    delete process.env.PI_WORKSPACE_ROOT;
+    delete process.env.PI_MATRIX_ACCESS_TOKEN_FILE;
+    delete process.env.OMP_CLI_PATH;
     vi.resetModules();
   });
 
@@ -30,9 +36,13 @@ describe('config', () => {
     return await import('../src/config');
   }
 
-  it('returns empty config when no file exists', async () => {
+  it('returns safe host defaults when no file exists', async () => {
     const { loadConfig } = await importConfig();
-    expect(loadConfig()).toEqual({});
+    const config = loadConfig();
+    expect(config.workspaceRoot).toBe('/srv/threads');
+    expect(config.maxWorkers).toBe(4);
+    expect(config.profiles?.research.approvalMode).toBe('write');
+    expect(config.externalWorkspaces).toEqual({});
   });
 
   it('env overrides matrix + trusted users + workdir + logLevel', async () => {
@@ -45,7 +55,7 @@ describe('config', () => {
     const { loadConfig } = await importConfig();
 
     const cfg = loadConfig();
-    expect(cfg.matrix).toEqual({
+    expect(cfg.matrix).toMatchObject({
       homeserverUrl: 'https://env.example.com',
       accessToken: 'syt-env-token',
       encryption: false,
@@ -127,9 +137,10 @@ describe('config', () => {
     writeFileSync(join(piDir, 'pi-courier.json'), '{invalid json!!!');
 
     const { loadConfig } = await importConfig();
-    // Should not throw, returns empty config
+    // Should not throw, returns safe defaults.
     const config = loadConfig();
-    expect(config).toEqual({});
+    expect(config.workspaceRoot).toBe('/srv/threads');
+    expect(config.profiles?.research.tools).toContain('web_search');
   });
 
   it('still applies env vars when config file is corrupted', async () => {
