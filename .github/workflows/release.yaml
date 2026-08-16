@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*-omp.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.0
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm prune --omit=dev
+      - name: Build host bundle
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release/omp-courier
+          cp -a dist node_modules package.json LICENSE README.md README.zh-CN.md release/omp-courier/
+          tar -C release -czf "omp-courier-${TAG}-linux-x64.tar.gz" omp-courier
+          sha256sum "omp-courier-${TAG}-linux-x64.tar.gz" > "omp-courier-${TAG}-linux-x64.tar.gz.sha256"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --generate-notes "omp-courier-${TAG}-linux-x64.tar.gz" "omp-courier-${TAG}-linux-x64.tar.gz.sha256"
