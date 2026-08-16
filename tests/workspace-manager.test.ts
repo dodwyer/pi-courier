@@ -48,4 +48,14 @@ describe("WorkspaceManager", () => {
     store.releaseWorkspace("nomadmade", "thread-a");
     expect(() => store.acquireWorkspace("nomadmade", "thread-b")).not.toThrow();
   });
+
+  it("locally excludes transcript metadata in an external Git workspace", () => {
+    const external = join(root, "..", "external");
+    mkdirSync(external, { recursive: true });
+    execFileSync("git", ["init", "-b", "main"], { cwd: external });
+    const manager = new WorkspaceManager(root, { starbug: { path: external } }, store);
+    expect(manager.resolve("repo:starbug").path).toBe(external);
+    expect(() => execFileSync("git", ["check-ignore", "-q", ".courier/transcript.md"], { cwd: external })).not.toThrow();
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: external, encoding: "utf-8" })).toBe("");
+  });
 });

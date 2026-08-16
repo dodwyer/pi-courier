@@ -63,6 +63,7 @@ export class WorkspaceManager {
     if (!fs.existsSync(workspacePath) || !fs.statSync(workspacePath).isDirectory()) {
       throw new Error(`External workspace ${name} is unavailable at ${workspacePath}`);
     }
+    ensureLocalGitExclude(workspacePath);
     this.store.upsertWorkspace({ name, path: workspacePath, kind: "external" });
     return this.store.getWorkspace(name)!;
   }
@@ -93,4 +94,21 @@ function ensureGitIgnore(workspacePath: string): void {
   const existing = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf-8") : "";
   if (existing.split(/\r?\n/).includes(".courier/")) return;
   fs.appendFileSync(ignorePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}.courier/\n`, { mode: 0o640 });
+}
+
+function ensureLocalGitExclude(workspacePath: string): void {
+  let excludePath: string;
+  try {
+    const gitPath = execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], {
+      cwd: workspacePath,
+      encoding: "utf-8",
+    }).trim();
+    excludePath = path.resolve(workspacePath, gitPath);
+  } catch {
+    return;
+  }
+  fs.mkdirSync(path.dirname(excludePath), { recursive: true, mode: 0o700 });
+  const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : "";
+  if (existing.split(/\r?\n/).includes(".courier/")) return;
+  fs.appendFileSync(excludePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}.courier/\n`, { mode: 0o600 });
 }

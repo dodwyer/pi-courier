@@ -2,9 +2,9 @@
 
 ## Architecture / 架构
 
-The Matrix transport extracts `m.thread` relations and hands authorized messages to `CourierRouter`. The router maps bridge commands or forwards prompts to `WorkerManager`. The manager owns workspace leases, SQLite state, direct OMP RPC processes, approvals, idle eviction, and event fan-out to Matrix and `courierctl`.
+The Matrix transport extracts `m.thread` relations and hands authorized messages to `CourierRouter`. The router maps bridge commands or forwards prompts to `WorkerManager`. The manager owns workspace leases, SQLite state, direct OMP RPC processes, safe workspace transcript mirrors, approvals, idle eviction, and event fan-out to Matrix and `courierctl`.
 
-Matrix transport 提取 `m.thread` 关系并把已授权消息交给 `CourierRouter`。路由器处理 bridge 命令，或把提示转给 `WorkerManager`。Worker manager 管理工作区租约、SQLite 状态、直接 OMP RPC 进程、审批、空闲回收，以及 Matrix 与 `courierctl` 的事件分发。
+Matrix transport 提取 `m.thread` 关系并把已授权消息交给 `CourierRouter`。路由器处理 bridge 命令，或把提示转给 `WorkerManager`。Worker manager 管理工作区租约、SQLite 状态、直接 OMP RPC 进程、安全的工作区对话镜像、审批、空闲回收，以及 Matrix 与 `courierctl` 的事件分发。
 
 ```text
 Matrix -> CourierRouter -> WorkerManager -> OmpRpcProcess -> omp --mode rpc-ui

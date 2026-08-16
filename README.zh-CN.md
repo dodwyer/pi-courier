@@ -17,6 +17,7 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
 - 每个线程选择一个 OMP profile 和工作区。
 - 每个工作区同一时间只能由一个 Matrix 或 SSH 会话占用。
 - 空闲 worker 会停止，但文件和 OMP 原生会话会保留。
+- 用户和助手文本会镜像到每个工作区的 `.courier/transcript.md`，便于通过 SSH 查看。
 - `courierctl watch` 可并发只读查看 RPC 输出。
 - `courierctl attach` 会暂停 Matrix 所有权，并用 OMP 原生 TUI 恢复同一会话。
 
@@ -38,6 +39,12 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
 ```
 
 顶层的 `!start` 或 `!continue` 消息会成为 Matrix 线程根。后续提示应在线程中回复。
+
+## 工作区输出与对话镜像
+
+OMP 以所选工作区作为当前目录运行，因此报告、代码和其他交付物会写入 `/srv/threads/<name>`。Courier 同时把便于阅读的对话镜像追加到 `.courier/transcript.md`。`.courier` 目录不会进入 Git；对于外部 Git 工作区，Courier 只更新本地 `.git/info/exclude`，不会修改受版本控制的 ignore 文件。
+
+镜像只包含带时间戳的 Matrix 用户文本和 OMP 助手文本，不记录隐藏推理、原始工具结果、工具参数或审批 payload。主动粘贴到对话中的文字仍可能包含敏感信息。Courier 状态目录中的受保护 OMP JSONL 会话仍是恢复会话和原生 TUI attach 的权威数据源。
 
 ## 配置
 
