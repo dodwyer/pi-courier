@@ -6,6 +6,7 @@ import { logger } from "../logger.js";
 import { PiRpc, type RpcFrame } from "../rpc/pi-rpc.js";
 import type { ExternalMessage, MsgBridgeConfig, OmpProfileConfig, ReplyContext } from "../types.js";
 import { StateStore, type ThreadRecord } from "./state-store.js";
+import { TranscriptWriter } from "./transcript-writer.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 
 export interface CourierActivity {
@@ -38,6 +39,7 @@ export interface WorkerManagerDeps {
 export class WorkerManager {
   readonly store: StateStore;
   readonly workspaces: WorkspaceManager;
+  readonly transcripts = new TranscriptWriter();
   private readonly workers = new Map<string, LiveWorker>();
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly activityListeners = new Set<(activity: CourierActivity) => void>();
@@ -117,6 +119,7 @@ export class WorkerManager {
     worker.lastActivity = Date.now();
     worker.record.lastActivity = worker.lastActivity;
     this.store.upsertThread(worker.record);
+    this.mirror(() => this.transcripts.appendUser(worker.record, msg, text), worker.record.workspace);
     await worker.rpc.prompt(text);
   }
 
@@ -209,6 +212,7 @@ export class WorkerManager {
     }
 
     this.store.acquireWorkspace(record.workspace, record.threadKey);
+    this.mirror(() => this.transcripts.ensureThread(record), record.workspace);
     fs.mkdirSync(record.sessionDir, { recursive: true, mode: 0o700 });
     const args = [
       "--profile", record.profile,
@@ -261,6 +265,7 @@ export class WorkerManager {
         const message = frame.message as AssistantMessage | undefined;
         if (message?.content) {
           const text = extractTextFromMessage(message).trim();
+          this.mirror(() => this.transcripts.appendAssistant(worker.record, text), worker.record.workspace);
           const toolCalls = formatToolCalls(message);
           const body = [text, toolCalls].filter(Boolean).join("\n\n");
           for (const chunk of splitMessage(body, 4000)) {
@@ -365,6 +370,14 @@ export class WorkerManager {
   private publish(record: ThreadRecord, frame: RpcFrame): void {
     const activity = { workspace: record.workspace, threadKey: record.threadKey, at: Date.now(), frame };
     for (const listener of this.activityListeners) listener(activity);
+  }
+
+  private mirror(action: () => void, workspace: string): void {
+    try {
+      action();
+    } catch (err) {
+      logger.warn(`[courier] transcript mirror failed for ${workspace}: ${(err as Error).message}`);
+    }
   }
 
   private async evictIdle(): Promise<void> {
