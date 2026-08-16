@@ -25,9 +25,21 @@ export class CourierRouter {
         await this.withError(msg, async () => {
           if (parts.length < 2) throw new Error("Usage: !start <profile> <workspace> [initial prompt]");
           const [profile, workspace, ...promptParts] = parts;
-          const record = await this.deps.workers.start(msg, profile, workspace);
-          await this.reply(msg, `✅ Started **${record.profile}** in \`${record.workspacePath}\`.`, record.rootEventId);
-          if (promptParts.length > 0) {
+          const briefIndex = promptParts.indexOf("--brief");
+          if (briefIndex >= 0) {
+            if (briefIndex !== 0 || promptParts.length !== 2) {
+              throw new Error("Usage: !start development <workspace> --brief <source-workspace>/development-briefs/<brief>.md");
+            }
+            const record = await this.deps.workers.startFromBrief(msg, profile, workspace, promptParts[1]);
+            await this.reply(
+              msg,
+              `✅ Started **${record.profile}** in \`${record.workspacePath}\` from approved brief \`${promptParts[1]}\`.`,
+              record.rootEventId,
+            );
+          } else {
+            const record = await this.deps.workers.start(msg, profile, workspace);
+            await this.reply(msg, `✅ Started **${record.profile}** in \`${record.workspacePath}\`.`, record.rootEventId);
+            if (promptParts.length === 0) return;
             const threaded = { ...msg, threadRootId: record.rootEventId };
             await this.deps.workers.prompt(threaded, promptParts.join(" "));
           }
@@ -114,6 +126,7 @@ function helpText(): string {
   return [
     "**OMP Courier commands**",
     "• `!start <profile> <workspace> [prompt]`",
+    "• `!start development <workspace> --brief <source-workspace>/development-briefs/<brief>.md`",
     "• `!continue <workspace>`",
     "• `!new [profile]`",
     "• `!status`, `!stop`, `!abort`",

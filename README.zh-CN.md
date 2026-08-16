@@ -26,6 +26,7 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
 ```text
 !start research nomadmade Research product ideas and write a report
 !start development repo:starbug Inspect the cluster repository
+!start development nomadbuild --brief nomadchef-ai/development-briefs/nomadbuild.md
 !continue nomadmade
 !new [profile]
 !status
@@ -39,6 +40,8 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
 ```
 
 顶层的 `!start` 或 `!continue` 消息会成为 Matrix 线程根。后续提示应在线程中回复。
+
+带 `--brief` 的形式是从研究到开发的显式人工审批交接。源文件必须是 Courier 托管工作区中 `development-briefs/` 目录下的 Markdown 文件。Courier 会把验证后的文件复制为新开发工作区中的 `BRIEF.md`，在 `.courier/handoff.json` 中记录来源和 SHA-256，然后启动 `development` profile。绝对路径、目录穿越、符号链接逃逸、外部工作区、超过 256 KiB 的文件以及已存在的目标都会被拒绝。
 
 ## 工作区输出与对话镜像
 
