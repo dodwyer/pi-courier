@@ -12,6 +12,7 @@ interface ControlRequest {
 
 export class ControlServer {
   private server?: net.Server;
+  private readonly sockets = new Set<net.Socket>();
 
   constructor(
     private readonly config: MsgBridgeConfig,
@@ -34,11 +35,18 @@ export class ControlServer {
   async stop(): Promise<void> {
     const server = this.server;
     this.server = undefined;
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) {
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      for (const socket of this.sockets) socket.destroy();
+      await closed;
+    }
+    this.sockets.clear();
     if (this.config.controlSocket && fs.existsSync(this.config.controlSocket)) fs.unlinkSync(this.config.controlSocket);
   }
 
   private handle(socket: net.Socket): void {
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
     let buffer = "";
     socket.setEncoding("utf-8");
     socket.on("data", (chunk) => {
