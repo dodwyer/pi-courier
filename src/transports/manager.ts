@@ -1,4 +1,4 @@
-import type { ExternalMessage } from "../types.js";
+import type { ExternalMessage, ReplyContext } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 
 /**
@@ -72,7 +72,8 @@ export class TransportManager {
   async sendMessage(
     chatId: string,
     transportType: string,
-    text: string
+    text: string,
+    context?: ReplyContext
   ): Promise<void> {
     const transport = this.transports.get(transportType);
     if (!transport) {
@@ -81,7 +82,7 @@ export class TransportManager {
     if (!transport.isConnected) {
       throw new Error(`Transport ${transportType} not connected`);
     }
-    await transport.sendMessage(chatId, text);
+    await transport.sendMessage(chatId, text, context);
   }
 
   /**

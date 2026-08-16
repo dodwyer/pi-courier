@@ -1,4 +1,7 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+export interface AssistantMessage {
+  role?: string;
+  content: Array<Record<string, unknown> & { type: string; text?: string; name?: string; arguments?: unknown }>;
+}
 
 /**
  * Extract text from assistant message.

@@ -11,7 +11,7 @@ import {
 import * as os from "os";
 import * as path from "path";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
-import type { ExternalMessage } from "../types.js";
+import type { ExternalMessage, ReplyContext } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 import {
   extractUsername,
@@ -37,7 +37,13 @@ export class MatrixProvider implements ITransportProvider {
   private connectedAt = 0;
 
   constructor(
-    private config: { homeserverUrl: string; accessToken: string; encryption?: boolean },
+    private config: {
+      homeserverUrl: string;
+      accessToken: string;
+      encryption?: boolean;
+      allowGroupRooms?: boolean;
+      storageDir?: string;
+    },
     private auth: ChallengeAuth
   ) {}
 
@@ -56,11 +62,8 @@ export class MatrixProvider implements ITransportProvider {
       throw new Error("Matrix homeserver URL and access token required");
     }
 
-    const storagePath = path.join(
-      os.homedir(),
-      ".pi",
-      "pi-courier-matrix-store.json"
-    );
+    const matrixStateDir = this.config.storageDir ?? path.join(os.homedir(), ".pi");
+    const storagePath = path.join(matrixStateDir, "matrix-store.json");
     const storage = new SimpleFsStorageProvider(storagePath);
 
     // Set up E2EE crypto storage if encryption is enabled.
@@ -70,11 +73,7 @@ export class MatrixProvider implements ITransportProvider {
     let cryptoProvider: RustSdkCryptoStorageProvider | undefined;
     if (this.config.encryption !== false) {
       try {
-        const cryptoStorePath = path.join(
-          os.homedir(),
-          ".pi",
-          "pi-courier-matrix-crypto"
-        );
+        const cryptoStorePath = path.join(matrixStateDir, "matrix-crypto");
         cryptoProvider = new RustSdkCryptoStorageProvider(cryptoStorePath, RustSdkCryptoStoreType.Sqlite);
         console.log("[Matrix] E2EE crypto storage enabled (Rust/SQLite)");
       } catch (err) {
@@ -185,13 +184,22 @@ export class MatrixProvider implements ITransportProvider {
     console.log("[Matrix] Disconnected");
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string, context?: ReplyContext): Promise<void> {
     if (!this.client) {
       throw new Error("Matrix client not connected");
     }
     if (!text?.trim()) return;
 
     const { body, formattedBody } = formatForMatrix(text);
+
+    const relation = context?.threadRootId
+      ? {
+          rel_type: "m.thread",
+          event_id: context.threadRootId,
+          is_falling_back: true,
+          ...(context.replyToId ? { "m.in_reply_to": { event_id: context.replyToId } } : {}),
+        }
+      : undefined;
 
     await this.client.sendMessage(chatId, {
       msgtype: "m.text",
@@ -200,6 +208,7 @@ export class MatrixProvider implements ITransportProvider {
         format: "org.matrix.custom.html",
         formatted_body: formattedBody,
       }),
+      ...(relation ? { "m.relates_to": relation } : {}),
     });
   }
 
@@ -232,6 +241,8 @@ export class MatrixProvider implements ITransportProvider {
     const username = extractUsername(userId);
     const messageText = event.content.body;
     const messageId = event.event_id;
+    const relatesTo = event.content?.["m.relates_to"];
+    const threadRootId = relatesTo?.rel_type === "m.thread" ? relatesTo.event_id : undefined;
 
     // Determine if group chat from cached member count (no API call per message)
     let memberCount = this.roomMemberCount.get(roomId);
@@ -246,6 +257,7 @@ export class MatrixProvider implements ITransportProvider {
       }
     }
     const isGroupChat = memberCount > 2;
+    if (isGroupChat && this.config.allowGroupRooms !== true) return;
 
     // Check if bot was mentioned (pure utility)
     const wasMentioned = isGroupChat ? wasBotMentioned(messageText, this.botUserId) : false;
@@ -294,6 +306,7 @@ export class MatrixProvider implements ITransportProvider {
         userId,
         timestamp: new Date(event.origin_server_ts || Date.now()),
         messageId,
+        threadRootId,
         isGroupChat,
         wasMentioned,
       };
