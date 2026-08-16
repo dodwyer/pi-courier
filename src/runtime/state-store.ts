@@ -89,6 +89,10 @@ export class StateStore {
     return rows.map(workspaceFromRow);
   }
 
+  deleteWorkspace(name: string): void {
+    this.db.prepare("DELETE FROM workspaces WHERE name = ?").run(name);
+  }
+
   acquireWorkspace(name: string, threadKey: string): void {
     const workspace = this.getWorkspace(name);
     if (!workspace) throw new Error(`Workspace ${name} is not registered`);
@@ -153,6 +157,10 @@ export class StateStore {
   listThreads(): ThreadRecord[] {
     const rows = this.db.prepare("SELECT * FROM threads ORDER BY last_activity DESC").all() as Record<string, unknown>[];
     return rows.map(threadFromRow);
+  }
+
+  deleteThread(threadKey: string): void {
+    this.db.prepare("DELETE FROM threads WHERE thread_key = ?").run(threadKey);
   }
 
   setThreadStatus(threadKey: string, status: string, sessionFile?: string): void {

@@ -26,6 +26,7 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 ```text
 !start research nomadmade Research product ideas and write a report
 !start development repo:starbug Inspect the cluster repository
+!start development nomadbuild --brief nomadchef-ai/development-briefs/nomadbuild.md
 !continue nomadmade
 !new [profile]
 !status
@@ -39,6 +40,8 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 ```
 
 A top-level `!start` or `!continue` message becomes the Matrix thread root. Send later prompts as replies in that thread.
+
+The `--brief` form is an explicit, human-approved handoff from research to development. The source must be a Markdown file below `development-briefs/` in a managed Courier workspace. Courier copies the validated file to `BRIEF.md` in a new development workspace, records its source and SHA-256 in `.courier/handoff.json`, and starts the `development` profile. Absolute paths, traversal, symlink escapes, external workspaces, files over 256 KiB, and existing targets are rejected.
 
 ## Workspace output and transcripts
 

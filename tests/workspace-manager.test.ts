@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -47,6 +47,59 @@ describe("WorkspaceManager", () => {
     expect(() => store.acquireWorkspace("nomadmade", "thread-b")).toThrow(/active in another/);
     store.releaseWorkspace("nomadmade", "thread-a");
     expect(() => store.acquireWorkspace("nomadmade", "thread-b")).not.toThrow();
+  });
+
+  it("copies an approved brief into a clean managed workspace with provenance", () => {
+    const manager = new WorkspaceManager(root, {}, store);
+    const source = manager.resolve("research-source");
+    const briefDir = join(source.path, "development-briefs");
+    mkdirSync(briefDir, { recursive: true });
+    const content = "# Build brief\n\nShip the approved tool.\n";
+    writeFileSync(join(briefDir, "tool.md"), content);
+
+    const handoff = manager.createFromBrief("build-tool", "research-source/development-briefs/tool.md");
+
+    expect(readFileSync(join(handoff.workspace.path, "BRIEF.md"), "utf-8")).toBe(content);
+    expect(statSync(join(handoff.workspace.path, "BRIEF.md")).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(join(handoff.workspace.path, ".courier", "handoff.json"), "utf-8"))).toMatchObject({
+      version: 1,
+      sourceWorkspace: "research-source",
+      sourcePath: "development-briefs/tool.md",
+      sourceSha256: handoff.sourceSha256,
+    });
+    expect(handoff.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: handoff.workspace.path, encoding: "utf-8" })).toBe("");
+  });
+
+  it("rejects unsafe or oversized brief references without creating a target", () => {
+    const manager = new WorkspaceManager(root, {}, store);
+    const source = manager.resolve("research-source");
+    const briefDir = join(source.path, "development-briefs");
+    mkdirSync(briefDir, { recursive: true });
+    writeFileSync(join(source.path, "outside.md"), "outside");
+    symlinkSync("../outside.md", join(briefDir, "linked.md"));
+    writeFileSync(join(briefDir, "large.md"), Buffer.alloc(256 * 1024 + 1));
+
+    expect(() => manager.createFromBrief("traversal", "research-source/development-briefs/../outside.md")).toThrow(/beneath/);
+    expect(() => manager.createFromBrief("symlink", "research-source/development-briefs/linked.md")).toThrow(/escapes/);
+    expect(() => manager.createFromBrief("oversized", "research-source/development-briefs/large.md")).toThrow(/exceeds/);
+    expect(() => manager.createFromBrief("absolute", "/research-source/development-briefs/large.md")).toThrow(/must be/);
+    expect(() => manager.createFromBrief("external", "repo:starbug/development-briefs/brief.md")).toThrow(/must match/);
+    for (const target of ["traversal", "symlink", "oversized", "absolute", "external"]) {
+      expect(() => statSync(join(root, target))).toThrow();
+      expect(store.getWorkspace(target)).toBeUndefined();
+    }
+  });
+
+  it("refuses to overwrite an existing handoff target", () => {
+    const manager = new WorkspaceManager(root, {}, store);
+    const source = manager.resolve("research-source");
+    const briefDir = join(source.path, "development-briefs");
+    mkdirSync(briefDir, { recursive: true });
+    writeFileSync(join(briefDir, "tool.md"), "approved\n");
+    manager.resolve("existing-target");
+
+    expect(() => manager.createFromBrief("existing-target", "research-source/development-briefs/tool.md")).toThrow(/already exists/);
   });
 
   it("locally excludes transcript metadata in an external Git workspace", () => {

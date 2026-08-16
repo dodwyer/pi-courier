@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,7 +48,10 @@ rl.on("line", line => {
       idleTimeoutSeconds: 3600,
       approvalTimeoutSeconds: 60,
       externalWorkspaces: {},
-      profiles: { research: { tools: ["read", "write"], approvalMode: "write" } },
+      profiles: {
+        research: { tools: ["read", "write"], approvalMode: "write" },
+        development: { tools: ["read", "write"], approvalMode: "always-ask" },
+      },
     };
     const replies: Array<{ workspace: string; text: string }> = [];
     const manager = new WorkerManager({
@@ -79,6 +82,57 @@ rl.on("line", line => {
     expect(secondTranscript).toContain("beta");
     expect(statSync(join(firstRecord.workspacePath, ".courier", "transcript.md")).mode & 0o777).toBe(0o600);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: firstRecord.workspacePath, encoding: "utf-8" })).toBe("");
+
+    const source = manager.workspaces.resolve("research-source");
+    mkdirSync(join(source.path, "development-briefs"), { recursive: true });
+    writeFileSync(join(source.path, "development-briefs", "tool.md"), "# Approved\n");
+    const handoffMessage = message("$root-c", "room-c");
+    const handoffRecord = await manager.startFromBrief(
+      handoffMessage,
+      "development",
+      "build-tool",
+      "research-source/development-briefs/tool.md",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(readFileSync(join(handoffRecord.workspacePath, "BRIEF.md"), "utf-8")).toBe("# Approved\n");
+    expect(readFileSync(join(handoffRecord.workspacePath, ".courier", "transcript.md"), "utf-8")).toContain(
+      "Read BRIEF.md and use it as the approved development brief.",
+    );
+    await expect(
+      manager.startFromBrief(first, "development", "must-not-exist", "research-source/development-briefs/tool.md"),
+    ).rejects.toThrow(/already initialized/);
+    expect(existsSync(join(dir, "threads", "must-not-exist"))).toBe(false);
+    expect(manager.store.getThread(firstRecord.threadKey)).toBeDefined();
+    await manager.shutdown();
+  });
+
+  it("rolls back a new brief workspace when the development worker cannot start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-worker-handoff-failure-"));
+    dirs.push(dir);
+    const manager = new WorkerManager({
+      config: {
+        workspaceRoot: join(dir, "threads"),
+        stateDir: join(dir, "state"),
+        controlSocket: join(dir, "control.sock"),
+        ompCliPath: join(dir, "missing-omp"),
+        externalWorkspaces: {},
+        profiles: { development: { tools: ["read", "write"], approvalMode: "always-ask" } },
+      },
+      sendReply: async () => {},
+      sendTyping: async () => {},
+    });
+    const source = manager.workspaces.resolve("research-source");
+    mkdirSync(join(source.path, "development-briefs"), { recursive: true });
+    writeFileSync(join(source.path, "development-briefs", "tool.md"), "# Approved\n");
+    const msg = message("$failed-root", "failed-room");
+
+    await expect(
+      manager.startFromBrief(msg, "development", "failed-build", "research-source/development-briefs/tool.md"),
+    ).rejects.toThrow();
+    expect(existsSync(join(dir, "threads", "failed-build"))).toBe(false);
+    expect(manager.store.getWorkspace("failed-build")).toBeUndefined();
+    expect(manager.store.getThread("failed-room\u001f$failed-root")).toBeUndefined();
+    expect(readdirSync(join(dir, "state", "sessions"))).toEqual([]);
     await manager.shutdown();
   });
 });

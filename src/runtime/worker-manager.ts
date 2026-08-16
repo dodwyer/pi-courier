@@ -36,6 +36,12 @@ export interface WorkerManagerDeps {
   sendTyping: (record: ThreadRecord) => Promise<void>;
 }
 
+const BRIEF_HANDOFF_PROMPT = [
+  "Read BRIEF.md and use it as the approved development brief.",
+  "Validate its assumptions against this workspace, report any genuinely blocking ambiguity, then implement and test the work against its acceptance criteria.",
+  "Keep BRIEF.md as the source of scope.",
+].join(" ");
+
 export class WorkerManager {
   readonly store: StateStore;
   readonly workspaces: WorkspaceManager;
@@ -86,6 +92,33 @@ export class WorkerManager {
     this.store.upsertThread(record);
     await this.ensureWorker(record, profile);
     return this.store.getThread(threadKey)!;
+  }
+
+  async startFromBrief(
+    msg: ExternalMessage,
+    profileName: string,
+    workspaceName: string,
+    briefReference: string,
+  ): Promise<ThreadRecord> {
+    if (profileName !== "development") throw new Error("Brief handoff is limited to the development profile");
+    this.profile(profileName);
+    const rootEventId = msg.threadRootId ?? msg.messageId;
+    const threadKey = makeThreadKey(msg.chatId, rootEventId);
+    if (this.store.getThread(threadKey)) throw new Error("This Matrix thread is already initialized");
+    const handoff = this.workspaces.createFromBrief(workspaceName, briefReference);
+    const sessionDir = path.join(required(this.deps.config.stateDir, "stateDir"), "sessions", threadId(threadKey));
+    try {
+      const record = await this.start(msg, profileName, workspaceName);
+      await this.prompt({ ...msg, threadRootId: record.rootEventId }, BRIEF_HANDOFF_PROMPT);
+      return record;
+    } catch (err) {
+      await this.stopWorker(threadKey).catch(() => {});
+      this.store.releaseWorkspace(workspaceName, threadKey);
+      this.store.deleteThread(threadKey);
+      this.workspaces.rollbackCreatedWorkspace(handoff.workspace);
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+      throw err;
+    }
   }
 
   async continue(msg: ExternalMessage, workspaceName: string): Promise<ThreadRecord> {

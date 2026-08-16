@@ -1,10 +1,19 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExternalWorkspaceConfig } from "../types.js";
 import type { StateStore, WorkspaceRecord } from "./state-store.js";
 
 const WORKSPACE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const MAX_BRIEF_BYTES = 256 * 1024;
+
+export interface BriefHandoff {
+  workspace: WorkspaceRecord;
+  sourceWorkspace: string;
+  sourcePath: string;
+  sourceSha256: string;
+}
 
 export class WorkspaceManager {
   constructor(
@@ -55,6 +64,63 @@ export class WorkspaceManager {
     return this.store.getWorkspace(name)!;
   }
 
+  createFromBrief(targetName: string, reference: string): BriefHandoff {
+    validateWorkspaceName(targetName);
+    const snapshot = this.readBrief(reference);
+    const workspacePath = path.resolve(this.root, targetName);
+    const relative = path.relative(path.resolve(this.root), workspacePath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Workspace path escapes workspaceRoot");
+    if (fs.existsSync(workspacePath) || this.store.getWorkspace(targetName)) {
+      throw new Error(`Brief handoff target ${targetName} already exists`);
+    }
+
+    const metadataPath = path.join(workspacePath, ".courier", "workspace.json");
+    try {
+      this.initialize(targetName, workspacePath, metadataPath);
+      fs.writeFileSync(path.join(workspacePath, "BRIEF.md"), snapshot.content, { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(workspacePath, ".courier", "handoff.json"),
+        `${JSON.stringify({
+          version: 1,
+          sourceWorkspace: snapshot.sourceWorkspace,
+          sourcePath: snapshot.sourcePath,
+          sourceSha256: snapshot.sourceSha256,
+          copiedAt: new Date().toISOString(),
+        }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      execFileSync("git", ["add", "BRIEF.md"], { cwd: workspacePath });
+      execFileSync("git", ["commit", "-m", "Import approved development brief"], { cwd: workspacePath });
+      this.store.upsertWorkspace({ name: targetName, path: workspacePath, kind: "managed" });
+      return {
+        workspace: this.store.getWorkspace(targetName)!,
+        sourceWorkspace: snapshot.sourceWorkspace,
+        sourcePath: snapshot.sourcePath,
+        sourceSha256: snapshot.sourceSha256,
+      };
+    } catch (err) {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+      this.store.deleteWorkspace(targetName);
+      throw err;
+    }
+  }
+
+  rollbackCreatedWorkspace(workspace: WorkspaceRecord): void {
+    const expectedPath = path.resolve(this.root, workspace.name);
+    if (workspace.kind !== "managed" || workspace.path !== expectedPath) {
+      throw new Error(`Refusing to remove non-handoff workspace ${workspace.name}`);
+    }
+    const current = this.store.getWorkspace(workspace.name);
+    if (current?.activeThreadKey) throw new Error(`Workspace ${workspace.name} is still active`);
+    const metadataPath = path.join(expectedPath, ".courier", "workspace.json");
+    if (fs.existsSync(metadataPath)) {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8")) as { name?: string };
+      if (metadata.name !== workspace.name) throw new Error(`Workspace metadata mismatch for ${workspace.name}`);
+    }
+    fs.rmSync(expectedPath, { recursive: true, force: true });
+    this.store.deleteWorkspace(workspace.name);
+  }
+
   private resolveExternal(name: string): WorkspaceRecord {
     const alias = name.slice("repo:".length);
     const config = this.external[alias];
@@ -66,6 +132,72 @@ export class WorkspaceManager {
     ensureLocalGitExclude(workspacePath);
     this.store.upsertWorkspace({ name, path: workspacePath, kind: "external" });
     return this.store.getWorkspace(name)!;
+  }
+
+  private readBrief(reference: string): {
+    sourceWorkspace: string;
+    sourcePath: string;
+    sourceSha256: string;
+    content: Buffer;
+  } {
+    if (!reference || reference.includes("\\") || path.posix.isAbsolute(reference)) {
+      throw new Error("Brief reference must be <workspace>/development-briefs/<brief>.md");
+    }
+    const separator = reference.indexOf("/");
+    if (separator <= 0) throw new Error("Brief reference must be <workspace>/development-briefs/<brief>.md");
+    const sourceWorkspace = reference.slice(0, separator);
+    const sourcePath = reference.slice(separator + 1);
+    validateWorkspaceName(sourceWorkspace);
+    if (
+      path.posix.normalize(sourcePath) !== sourcePath
+      || !sourcePath.startsWith("development-briefs/")
+      || sourcePath === "development-briefs/"
+      || path.posix.extname(sourcePath) !== ".md"
+    ) {
+      throw new Error("Brief must be a Markdown file beneath development-briefs");
+    }
+
+    const source = this.resolve(sourceWorkspace, false);
+    if (source.kind !== "managed") throw new Error("Brief source must be a managed Courier workspace");
+    const sourceRoot = fs.realpathSync(source.path);
+    let briefRoot: string;
+    try {
+      briefRoot = fs.realpathSync(path.join(source.path, "development-briefs"));
+    } catch {
+      throw new Error(`Development brief ${reference} does not exist`);
+    }
+    const briefRootRelative = path.relative(sourceRoot, briefRoot);
+    if (!briefRootRelative || briefRootRelative.startsWith("..") || path.isAbsolute(briefRootRelative)) {
+      throw new Error("development-briefs must be a directory inside the source workspace");
+    }
+    const candidate = path.resolve(source.path, ...sourcePath.split("/"));
+    let realCandidate: string;
+    try {
+      realCandidate = fs.realpathSync(candidate);
+    } catch {
+      throw new Error(`Development brief ${reference} does not exist`);
+    }
+    const relative = path.relative(briefRoot, realCandidate);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Brief path escapes development-briefs");
+    }
+
+    let descriptor: number | undefined;
+    try {
+      descriptor = fs.openSync(candidate, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile()) throw new Error("Development brief must be a regular file");
+      if (stat.size > MAX_BRIEF_BYTES) throw new Error(`Development brief exceeds ${MAX_BRIEF_BYTES} bytes`);
+      const content = fs.readFileSync(descriptor);
+      return {
+        sourceWorkspace,
+        sourcePath,
+        sourceSha256: createHash("sha256").update(content).digest("hex"),
+        content,
+      };
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+    }
   }
 
   private initialize(name: string, workspacePath: string, metadataPath: string): void {
