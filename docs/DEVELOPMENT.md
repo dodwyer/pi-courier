@@ -2,9 +2,9 @@
 
 ## Architecture / 架构
 
-The Matrix transport extracts `m.thread` relations and hands authorized messages to `CourierRouter`. The router maps bridge commands or forwards prompts to `WorkerManager`. The manager owns workspace leases, SQLite state, direct OMP RPC processes, safe workspace transcript mirrors, approvals, idle eviction, and event fan-out to Matrix and `courierctl`.
+The Matrix transport extracts `m.thread` relations and hands authorized messages to `CourierRouter`. The router maps bridge commands or forwards prompts to `WorkerManager`. The manager owns workspace leases, SQLite state, direct OMP RPC processes, safe workspace transcript mirrors, interactive requests, idle eviction, and event fan-out to Matrix and `courierctl`.
 
-Matrix transport 提取 `m.thread` 关系并把已授权消息交给 `CourierRouter`。路由器处理 bridge 命令，或把提示转给 `WorkerManager`。Worker manager 管理工作区租约、SQLite 状态、直接 OMP RPC 进程、安全的工作区对话镜像、审批、空闲回收，以及 Matrix 与 `courierctl` 的事件分发。
+Matrix transport 提取 `m.thread` 关系并把已授权消息交给 `CourierRouter`。路由器处理 bridge 命令，或把提示转给 `WorkerManager`。Worker manager 管理工作区租约、SQLite 状态、直接 OMP RPC 进程、安全的工作区对话镜像、交互请求、空闲回收，以及 Matrix 与 `courierctl` 的事件分发。
 
 ```text
 Matrix -> CourierRouter -> WorkerManager -> OmpRpcProcess -> omp --mode rpc-ui
@@ -18,7 +18,7 @@ Matrix -> CourierRouter -> WorkerManager -> OmpRpcProcess -> omp --mode rpc-ui
 - One active owner per workspace. / 每个工作区只有一个活动所有者。
 - One serialized OMP process per live Matrix thread. / 每个活动 Matrix 线程只有一个串行 OMP 进程。
 - Exact session paths are persisted; `--continue` is never used globally. / 持久化精确 session 路径，不使用全局 `--continue`。
-- Matrix approval IDs are scoped to their originating thread and fail closed. / Matrix 审批 ID 只在来源线程有效，超时默认拒绝。
+- Matrix interaction IDs are single-use, scoped to their originating thread, and fail closed. / Matrix 交互 ID 只能使用一次、只在来源线程有效，并在超时时默认拒绝或取消。
 - Unmanaged existing directories are never adopted implicitly. / 不会隐式接管已有未管理目录。
 
 ## Validation / 验证

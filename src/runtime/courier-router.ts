@@ -88,6 +88,27 @@ export class CourierRouter {
           await this.reply(msg, name === "!approve" ? "✅ Approved." : "⛔ Denied.");
         });
         return;
+      case "!choose":
+        await this.withError(msg, async () => {
+          if (parts.length !== 2) throw new Error("Usage: !choose <interaction-id> <number>");
+          const value = await this.deps.workers.resolveSelection(msg, parts[0], parts[1]);
+          await this.reply(msg, `✅ Selected: ${value}`);
+        });
+        return;
+      case "!answer":
+        await this.withError(msg, async () => {
+          const answer = parseAnswer(msg.content);
+          await this.deps.workers.resolveTextInput(msg, answer.shortId, answer.value);
+          await this.reply(msg, "✅ Answer submitted.");
+        });
+        return;
+      case "!cancel":
+        await this.withError(msg, async () => {
+          if (parts.length !== 1) throw new Error("Usage: !cancel <interaction-id>");
+          await this.deps.workers.cancelInteraction(msg, parts[0]);
+          await this.reply(msg, "⛔ Interaction cancelled.");
+        });
+        return;
       case "!profiles":
         await this.reply(msg, `Profiles:\n${Object.keys(this.deps.config.profiles ?? {}).map((profile) => `• ${profile}`).join("\n")}`);
         return;
@@ -131,8 +152,28 @@ function helpText(): string {
     "• `!new [profile]`",
     "• `!status`, `!stop`, `!abort`",
     "• `!approve <id>`, `!deny <id>`",
+    "• `!choose <id> <number>`, `!answer <id> <text>`, `!cancel <id>`",
     "• `!profiles`, `!workspaces`",
     "",
     "Dynamic workspaces are created under the configured workspace root. Existing repositories use `repo:<name>`.",
   ].join("\n");
+}
+
+function parseAnswer(content: string): { shortId: string; value: string } {
+  const input = content.trimStart();
+  const match = /^!answer[ \t]+(\S+)/i.exec(input);
+  if (!match) throw new Error("Usage: !answer <interaction-id> <text>");
+  const shortId = match[1];
+  let value = input.slice(match[0].length);
+  if (value.startsWith("\r\n")) value = value.slice(2);
+  else if (value.startsWith("\n")) value = value.slice(1);
+  else {
+    const separator = /^[ \t]+/.exec(value);
+    if (!separator) throw new Error("Usage: !answer <interaction-id> <text>");
+    value = value.slice(separator[0].length);
+    if (value.startsWith("\r\n")) value = value.slice(2);
+    else if (value.startsWith("\n")) value = value.slice(1);
+  }
+  if (!value.trim()) throw new Error("Answer cannot be empty; use !cancel to cancel the interaction");
+  return { shortId, value };
 }

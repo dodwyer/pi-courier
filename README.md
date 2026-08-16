@@ -34,6 +34,9 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 !abort
 !approve <id>
 !deny <id>
+!choose <id> <number>
+!answer <id> <text>
+!cancel <id>
 !profiles
 !workspaces
 !help
@@ -41,13 +44,21 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 
 A top-level `!start` or `!continue` message becomes the Matrix thread root. Send later prompts as replies in that thread.
 
+OMP confirmations, selections, short inputs, and editor prompts are bridged into
+the originating Matrix thread. Selections use the numbered `!choose` command.
+Use `!answer <id> <text>` for short input, or put `!answer <id>` on the first
+line and multiline editor content below it. `!cancel` cancels a pending select,
+input, or editor request. Interaction IDs are single-use, thread-scoped, and
+expire at the shorter of the OMP request timeout and Courier's configured
+approval timeout.
+
 The `--brief` form is an explicit, human-approved handoff from research to development. The source must be a Markdown file below `development-briefs/` in a managed Courier workspace. Courier copies the validated file to `BRIEF.md` in a new development workspace, records its source and SHA-256 in `.courier/handoff.json`, and starts the `development` profile. Absolute paths, traversal, symlink escapes, external workspaces, files over 256 KiB, and existing targets are rejected.
 
 ## Workspace output and transcripts
 
 OMP runs with the selected workspace as its current directory, so requested reports, code, and other deliverables are written under `/srv/threads/<name>`. Courier also appends a human-readable conversation mirror to `.courier/transcript.md`. The `.courier` directory is excluded from Git, and external Git workspaces use their local `.git/info/exclude` rather than a tracked ignore change.
 
-The mirror contains Matrix user text and OMP assistant text with timestamps. It deliberately excludes hidden reasoning, raw tool results, tool arguments, and approval payloads. Text deliberately pasted into the conversation may still be sensitive. Protected OMP session JSONL under Courier's state directory remains authoritative for resume and native TUI attach.
+The mirror contains Matrix user text and OMP assistant text with timestamps. It deliberately excludes hidden reasoning, raw tool results, tool arguments, and interactive-input or approval payloads. Text deliberately pasted into the conversation may still be sensitive. Protected OMP session JSONL under Courier's state directory remains authoritative for resume and native TUI attach.
 
 ## Configuration
 
@@ -91,12 +102,13 @@ Built-in profiles are `research`, `development`, and `autonomous-development`. T
 courierctl list
 courierctl status nomadmade
 courierctl watch nomadmade
+courierctl watch nomadmade --raw
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
 ```
 
-`watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits.
+`watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits.
 
 ## Development
 

@@ -42,6 +42,49 @@ describe("CourierRouter", () => {
     expect(startFromBrief).not.toHaveBeenCalled();
     expect(replies[0]).toContain("Usage: !start development");
   });
+
+  it("routes explicit selection, text, multiline editor, and cancellation responses", async () => {
+    const resolveSelection = vi.fn(async () => "second option");
+    const resolveTextInput = vi.fn(async () => {});
+    const cancelInteraction = vi.fn(async () => {});
+    const replies: string[] = [];
+    const router = new CourierRouter({
+      config: config(),
+      workers: { resolveSelection, resolveTextInput, cancelInteraction } as unknown as WorkerManager,
+      reply: async (_msg, text) => { replies.push(text); },
+    });
+
+    await router.handle(message("!choose select01 2"));
+    await router.handle(message("!answer input001 a short answer"));
+    await router.handle(message("!answer editor01\n  first line\nsecond line\n"));
+    await router.handle(message("!cancel editor02"));
+
+    expect(resolveSelection).toHaveBeenCalledWith(expect.anything(), "select01", "2");
+    expect(resolveTextInput).toHaveBeenNthCalledWith(1, expect.anything(), "input001", "a short answer");
+    expect(resolveTextInput).toHaveBeenNthCalledWith(2, expect.anything(), "editor01", "  first line\nsecond line\n");
+    expect(cancelInteraction).toHaveBeenCalledWith(expect.anything(), "editor02");
+    expect(replies).toEqual([
+      "✅ Selected: second option",
+      "✅ Answer submitted.",
+      "✅ Answer submitted.",
+      "⛔ Interaction cancelled.",
+    ]);
+  });
+
+  it("rejects an empty explicit answer", async () => {
+    const resolveTextInput = vi.fn();
+    const replies: string[] = [];
+    const router = new CourierRouter({
+      config: config(),
+      workers: { resolveTextInput } as unknown as WorkerManager,
+      reply: async (_msg, text) => { replies.push(text); },
+    });
+
+    await router.handle(message("!answer input001   "));
+
+    expect(resolveTextInput).not.toHaveBeenCalled();
+    expect(replies[0]).toContain("Answer cannot be empty");
+  });
 });
 
 function config(): MsgBridgeConfig {
