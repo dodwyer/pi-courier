@@ -1,4 +1,4 @@
-import type { ExternalMessage } from "../types.js";
+import type { ExternalMessage, ReplyContext } from "../types.js";
 
 /**
  * Transport provider interface
@@ -27,7 +27,7 @@ export interface ITransportProvider {
    * @param chatId - Chat/channel identifier
    * @param text - Message content
    */
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, context?: ReplyContext): Promise<void>;
 
   /**
    * Send typing indicator to a chat

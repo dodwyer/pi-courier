@@ -16,10 +16,30 @@ export interface ExternalMessage {
   timestamp: Date;
   /** Unique message identifier */
   messageId: string;
+  /** Matrix thread root event. Undefined for a room-timeline message. */
+  threadRootId?: string;
   /** Is this a group/channel message? */
   isGroupChat: boolean;
   /** Was the bot mentioned? (for group chats) */
   wasMentioned?: boolean;
+}
+
+export interface ReplyContext {
+  threadRootId?: string;
+  replyToId?: string;
+}
+
+export type ApprovalMode = "always-ask" | "write" | "yolo";
+
+export interface OmpProfileConfig {
+  tools: string[];
+  approvalMode: ApprovalMode;
+  model?: string;
+  configFiles?: string[];
+}
+
+export interface ExternalWorkspaceConfig {
+  path: string;
 }
 
 /**
@@ -28,8 +48,11 @@ export interface ExternalMessage {
 export interface MsgBridgeConfig {
   matrix?: {
     homeserverUrl: string;
-    accessToken: string;
+    accessToken?: string;
+    accessTokenFile?: string;
     encryption?: boolean;
+    allowGroupRooms?: boolean;
+    storageDir?: string;
   };
   auth?: {
     trustedUsers?: string[];
@@ -48,6 +71,19 @@ export interface MsgBridgeConfig {
   cliPath?: string;
   /** 日志级别:debug | info | warn | error(默认 info;`pi-courier logs --level debug` 可查看全量) */
   logLevel?: string;
+  workspaceRoot?: string;
+  stateDir?: string;
+  controlSocket?: string;
+  ompCliPath?: string;
+  maxWorkers?: number;
+  idleTimeoutSeconds?: number;
+  approvalTimeoutSeconds?: number;
+  profiles?: Record<string, OmpProfileConfig>;
+  externalWorkspaces?: Record<string, ExternalWorkspaceConfig>;
+  authBroker?: {
+    url: string;
+    tokenFile: string;
+  };
   /**
    * 固定设备 ID(仅密码登录适用):重跑 setup 时复用同一个设备,
    * 避免换 token 后设备身份变化导致 M_BAD_JSON / 历史密钥丢失。
@@ -75,6 +111,7 @@ export interface PendingRemoteChat {
   transport: string;
   username: string;
   messageId: string;
+  threadRootId?: string;
 }
 
 /**
