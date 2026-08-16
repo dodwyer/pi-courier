@@ -68,7 +68,7 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
   },
   "authBroker": {
     "url": "http://127.0.0.1:8765",
-    "tokenFile": "/var/lib/omp-courier/auth-broker.token"
+    "tokenFile": "/var/lib/omp-courier/.omp/auth-broker.token"
   }
 }
 ```
