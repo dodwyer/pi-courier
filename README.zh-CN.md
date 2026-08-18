@@ -52,7 +52,9 @@ OMP 的确认、选择、短文本输入和编辑器请求都会桥接到原 Mat
 
 OMP 以所选工作区作为当前目录运行，因此报告、代码和其他交付物会写入 `/srv/threads/<name>`。Courier 同时把便于阅读的对话镜像追加到 `.courier/transcript.md`。`.courier` 目录不会进入 Git；对于外部 Git 工作区，Courier 只更新本地 `.git/info/exclude`，不会修改受版本控制的 ignore 文件。
 
-镜像只包含带时间戳的 Matrix 用户文本和 OMP 助手文本，不记录隐藏推理、原始工具结果、工具参数、交互输入或审批 payload。主动粘贴到对话中的文字仍可能包含敏感信息。Courier 状态目录中的受保护 OMP JSONL 会话仍是恢复会话和原生 TUI attach 的权威数据源。
+镜像包含带时间戳的 Matrix 用户文本、OMP 助手文本和 Courier 运行更新，不记录隐藏推理、原始工具结果、工具参数、交互输入或审批 payload。主动粘贴到对话中的文字仍可能包含敏感信息。Courier 状态目录中的受保护 OMP JSONL 会话仍是恢复会话和原生 TUI attach 的权威数据源。
+
+Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更新和按模型统计的 token 报告。运行中的子代理使用 OMP 的实时 token 计数并标记为 `~`；task 结束后，会用精确的输入、输出、缓存读取和缓存写入总数替换估算值。设置 `hideToolCalls` 可避免在普通 Matrix 回复中显示原始工具名称和参数；需要协议级输出的运维人员仍可使用 `courierctl watch --raw`。
 
 ## 配置
 
@@ -73,7 +75,13 @@ OMP 以所选工作区作为当前目录运行，因此报告、代码和其他�
   "ompCliPath": "/opt/omp-courier/omp/17.2.10/omp",
   "maxWorkers": 4,
   "idleTimeoutSeconds": 1800,
-  "approvalTimeoutSeconds": 600
+  "approvalTimeoutSeconds": 600,
+  "hideToolCalls": true,
+  "runReporting": {
+    "intervalSeconds": 600,
+    "readableProgress": true,
+    "finalUsage": true
+  }
 }
 ```
 
@@ -92,6 +100,16 @@ courierctl adopt existing-directory
 ```
 
 `watch` 是并发只读的精简事件视图，不是完整的 OMP 交互界面。默认情况下，它会把助手文本中的字面 `\n` 和 `\r\n` 渲染成换行，即使转义序列被拆分到多个流式 frame 中也能处理。需要查看精确原始流时使用 `--raw`。`attach` 提供完整原生 TUI，因此会独占工作区直到退出。
+
+## 隔离的 E2E canary
+
+`courier-e2e` 使用独立 Matrix 用户和独立 Courier 实例，通过固定且受版本控制的测试套件进行端到端验证。它创建或复用与 canary bot 的加密私聊，把每个 case 作为顶层 `!start` 发送，通过隔离的控制 socket 观察执行状态，验证工作区中的持久化产物，并生成权限为 `0600` 的 JSON 与 Markdown 报告。
+
+```bash
+courier-e2e run --config /etc/omp-courier-canary/suite.json
+```
+
+该命令故意不提供任意 prompt 参数。测试 prompt 只能来自 root 管理的 JSON 配置；case 会串行运行，并使用唯一工作区名称。Canary 必须拥有独立的 Matrix 身份、Unix 账号、加密状态、Courier 状态、工作区根目录和控制 socket；不要把自动化凭据加入生产 Courier 的 trusted-user 列表。Matrix token 只能通过 credential 文件传入，且不会写入报告。
 
 ## 开发
 

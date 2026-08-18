@@ -5,6 +5,7 @@ import { type AssistantMessage, extractTextFromMessage, formatToolCalls, splitMe
 import { logger } from "../logger.js";
 import { PiRpc, type RpcFrame } from "../rpc/pi-rpc.js";
 import type { ExternalMessage, MsgBridgeConfig, OmpProfileConfig, ReplyContext } from "../types.js";
+import { RunReporter } from "./run-reporter.js";
 import { StateStore, type ThreadRecord } from "./state-store.js";
 import { TranscriptWriter } from "./transcript-writer.js";
 import { WorkspaceManager } from "./workspace-manager.js";
@@ -21,6 +22,7 @@ interface LiveWorker {
   rpc: PiRpc;
   busy: boolean;
   lastActivity: number;
+  reporter: RunReporter;
 }
 
 type InteractiveMethod = "confirm" | "select" | "input" | "editor";
@@ -290,7 +292,19 @@ export class WorkerManager {
       args,
       env,
     });
-    const worker: LiveWorker = { record, rpc, busy: false, lastActivity: Date.now() };
+    const reporting = this.deps.config.runReporting;
+    const reporter = new RunReporter({
+      intervalSeconds: reporting?.intervalSeconds ?? 0,
+      readableProgress: reporting?.readableProgress ?? false,
+      finalUsage: reporting?.finalUsage ?? false,
+      send: async (text) => {
+        this.mirror(() => this.transcripts.appendAssistant(record, text), record.workspace);
+        await this.sendInteractionReply(record, text).catch((err) => {
+          logger.error(`[courier] Matrix run update failed: ${(err as Error).message}`);
+        });
+      },
+    });
+    const worker: LiveWorker = { record, rpc, reporter, busy: false, lastActivity: Date.now() };
     rpc.onEvent((frame) => void this.handleFrame(worker, frame));
     try {
       await rpc.start();
@@ -308,6 +322,9 @@ export class WorkerManager {
   private async handleFrame(worker: LiveWorker, frame: RpcFrame): Promise<void> {
     worker.lastActivity = Date.now();
     this.publish(worker.record, frame);
+    await worker.reporter.handle(frame).catch((err) => {
+      logger.warn(`[courier] run reporter ignored an invalid OMP frame: ${(err as Error).message}`);
+    });
     switch (frame.type) {
       case "turn_start":
       case "agent_start":
@@ -321,8 +338,9 @@ export class WorkerManager {
         if (message?.content) {
           const text = extractTextFromMessage(message).trim();
           this.mirror(() => this.transcripts.appendAssistant(worker.record, text), worker.record.workspace);
-          const toolCalls = formatToolCalls(message);
+          const toolCalls = this.deps.config.hideToolCalls ? "" : formatToolCalls(message);
           const body = [text, toolCalls].filter(Boolean).join("\n\n");
+          if (!body) return;
           for (const chunk of splitMessage(body, 4000)) {
             await this.deps.sendReply(worker.record, chunk, {
               threadRootId: worker.record.rootEventId,
@@ -341,6 +359,7 @@ export class WorkerManager {
         await this.handleUiRequest(worker, frame);
         return;
       case "process_exit":
+        worker.reporter.close();
         this.clearInteractions(worker.record.threadKey);
         this.workers.delete(worker.record.threadKey);
         this.store.releaseWorkspace(worker.record.workspace, worker.record.threadKey);
@@ -428,6 +447,7 @@ export class WorkerManager {
     }
     await this.refreshState(worker);
     this.workers.delete(threadKey);
+    worker.reporter.close();
     await worker.rpc.stop();
     this.store.releaseWorkspace(worker.record.workspace, threadKey);
     this.store.setThreadStatus(threadKey, status, worker.record.sessionFile);
