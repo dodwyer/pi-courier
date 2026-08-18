@@ -109,33 +109,6 @@ export class TransportManager {
     this.errorHandler = handler;
   }
 
-  /** Create a private room via the Matrix transport (null if unavailable). */
-  async createProjectRoom(name: string, inviteUserId: string): Promise<string | null> {
-    const matrix = this.transports.get("matrix");
-    if (!matrix?.createProjectRoom) return null;
-    return matrix.createProjectRoom(name, inviteUserId);
-  }
-
-  /** Rename a room via the Matrix transport (no-op if unavailable). */
-  async setRoomName(roomId: string, name: string): Promise<void> {
-    const matrix = this.transports.get("matrix");
-    if (matrix?.setRoomName) await matrix.setRoomName(roomId, name);
-  }
-
-  /** Get a room's current name via the Matrix transport (null if unavailable). */
-  async getRoomName(roomId: string): Promise<string | null> {
-    const matrix = this.transports.get("matrix");
-    if (!matrix?.getRoomName) return null;
-    return matrix.getRoomName(roomId);
-  }
-
-  /** Have the bot actively leave a room (no-op if unavailable). */
-  async leaveRoom(roomId: string, reason?: string): Promise<void> {
-    const matrix = this.transports.get("matrix");
-    if (!matrix?.leaveRoom) return;
-    await matrix.leaveRoom(roomId, reason);
-  }
-
   /**
    * Get connection status for all transports
    */

@@ -46,14 +46,4 @@ export interface ITransportProvider {
    * @param handler - Error handler function
    */
   onError(handler: (error: Error) => void): void;
-
-  // ---- optional room management (Matrix transport) ---------------------------
-  /** Create a private room with a name and invite a user. Returns room ID. */
-  createProjectRoom?(name: string, inviteUserId: string): Promise<string>;
-  /** Rename a room. */
-  setRoomName?(roomId: string, name: string): Promise<void>;
-  /** Get the current room name (null if none). */
-  getRoomName?(roomId: string): Promise<string | null>;
-  /** Have the bot actively leave a room. */
-  leaveRoom?(roomId: string, reason?: string): Promise<void>;
 }

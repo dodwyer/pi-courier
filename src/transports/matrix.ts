@@ -51,42 +51,6 @@ export class MatrixProvider implements ITransportProvider {
     return this._isConnected;
   }
 
-  /** Create a private project room (used by /newproject). */
-  async createProjectRoom(name: string, inviteUserId: string): Promise<string> {
-    if (!this.client) throw new Error("Matrix 未连接");
-    const roomId = await this.client.createRoom({
-      name,
-      invite: [inviteUserId],
-      preset: "private_chat",
-    });
-    return roomId;
-  }
-
-  /** Rename a room (used to brand the DM as the management room). */
-  async setRoomName(roomId: string, name: string): Promise<void> {
-    if (!this.client) throw new Error("Matrix 未连接");
-    await this.client.sendStateEvent(roomId, "m.room.name", "", { name });
-  }
-
-  /** Get the current room name (null if the room has no name yet). */
-  async getRoomName(roomId: string): Promise<string | null> {
-    if (!this.client) return null;
-    try {
-      const ev = await this.client.getRoomStateEvent(roomId, "m.room.name", "");
-      return (ev as { name?: string } | undefined)?.name ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Have the bot actively leave a room (used by /pmctl rm). */
-  async leaveRoom(roomId: string, reason?: string): Promise<void> {
-    if (!this.client) throw new Error("Matrix 未连接");
-    await this.client.leaveRoom(roomId, reason);
-    this.joinedRooms.delete(roomId);
-    this.roomMemberCount.delete(roomId);
-  }
-
   // Formatting delegated to matrix-utils.ts (pure, testable)
 
   async connect(): Promise<void> {
@@ -135,20 +99,7 @@ export class MatrixProvider implements ITransportProvider {
       this.joinedRooms.add(roomId);
       // Refresh member count asynchronously
       this.client?.getJoinedRoomMembers(roomId)
-        .then(members => {
-          this.roomMemberCount.set(roomId, members.length);
-          // Multi-user room that isn't explicitly enabled: post a one-time
-          // hint so the inviter knows how to enable it. The room.join event
-          // only fires on (re)join, so this is naturally idempotent.
-          if (members.length > 2 && !this.auth.isChannelEnabled(roomId)) {
-            this.sendMessage(
-              roomId,
-              `🤖 我已加入这个群聊,但默认不回应群消息。\n\n` +
-                `启用方式:直接在群里发 /enable trusted-only\n` +
-                `(或 all = 回应所有人 / mentions = 只回应 @我;仅信任用户可启用)`
-            ).catch(() => {});
-          }
-        })
+        .then(members => this.roomMemberCount.set(roomId, members.length))
         .catch(() => {});
     });
     this.client.on("room.leave", (roomId: string) => {
