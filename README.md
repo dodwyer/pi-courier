@@ -58,7 +58,14 @@ The `--brief` form is an explicit, human-approved handoff from research to devel
 
 OMP runs with the selected workspace as its current directory, so requested reports, code, and other deliverables are written under `/srv/threads/<name>`. Courier also appends a human-readable conversation mirror to `.courier/transcript.md`. The `.courier` directory is excluded from Git, and external Git workspaces use their local `.git/info/exclude` rather than a tracked ignore change.
 
-The mirror contains Matrix user text and OMP assistant text with timestamps. It deliberately excludes hidden reasoning, raw tool results, tool arguments, and interactive-input or approval payloads. Text deliberately pasted into the conversation may still be sensitive. Protected OMP session JSONL under Courier's state directory remains authoritative for resume and native TUI attach.
+The mirror contains Matrix user text, OMP assistant text, and Courier run updates with timestamps. It deliberately excludes hidden reasoning, raw tool results, tool arguments, and interactive-input or approval payloads. Text deliberately pasted into the conversation may still be sensitive. Protected OMP session JSONL under Courier's state directory remains authoritative for resume and native TUI attach.
+
+Courier can also turn native OMP task events into short Matrix stage updates and
+per-model token reports. Live subagent totals use OMP's running token counter
+and are marked `~`; exact input, output, cache-read, and cache-write totals
+replace them when the task settles. Set `hideToolCalls` to keep raw tool names
+and arguments out of normal Matrix replies; `courierctl watch --raw` remains
+available to an operator who needs protocol-level output.
 
 ## Configuration
 
@@ -84,6 +91,12 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
   "maxWorkers": 4,
   "idleTimeoutSeconds": 1800,
   "approvalTimeoutSeconds": 600,
+  "hideToolCalls": true,
+  "runReporting": {
+    "intervalSeconds": 600,
+    "readableProgress": true,
+    "finalUsage": true
+  },
   "externalWorkspaces": {
     "starbug": { "path": "/root/workspace/starbug" }
   },
@@ -109,6 +122,25 @@ courierctl adopt existing-directory
 ```
 
 `watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits.
+
+## Isolated E2E canary
+
+`courier-e2e` drives a fixed, versioned test suite through a separate Matrix
+user and a separate Courier instance. It creates or reuses an encrypted direct
+room with the configured canary bot, sends each suite case as a top-level
+`!start`, observes the isolated control socket, validates durable workspace
+artifacts, and writes mode-`0600` JSON and Markdown reports.
+
+```bash
+courier-e2e run --config /etc/omp-courier-canary/suite.json
+```
+
+The CLI deliberately has no prompt argument. Suite prompts live in the
+root-managed JSON configuration, and cases run sequentially with unique
+workspace names. Give the canary its own Matrix identities, Unix account,
+crypto state, Courier state, workspace root, and control socket; never add an
+automation credential to a production Courier trusted-user list. Matrix tokens
+must be supplied through credential files and are never copied into reports.
 
 ## Development
 

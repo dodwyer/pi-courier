@@ -27,11 +27,14 @@ rl.on("line", line => {
   } else if (frame.type === "prompt") {
     process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{agentInvoked:true}})+"\\n");
     process.stdout.write(JSON.stringify({type:"turn_start"})+"\\n");
-    process.stdout.write(JSON.stringify({type:"turn_end",message:{role:"assistant",content:[
+    const content = frame.message === "tool-only" ? [
+      {type:"toolCall",name:"secret_tool",arguments:{token:"raw-tool-secret"}}
+    ] : [
       {type:"text",text:"reply:"+frame.message},
       {type:"thinking",text:"hidden reasoning"},
       {type:"toolCall",name:"secret_tool",arguments:{token:"raw-tool-secret"}}
-    ]}})+"\\n");
+    ];
+    process.stdout.write(JSON.stringify({type:"turn_end",message:{role:"assistant",content}})+"\\n");
     process.stdout.write(JSON.stringify({type:"agent_end"})+"\\n");
   } else if (frame.type === "abort") {
     process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true})+"\\n");
@@ -47,6 +50,7 @@ rl.on("line", line => {
       maxWorkers: 4,
       idleTimeoutSeconds: 3600,
       approvalTimeoutSeconds: 60,
+      hideToolCalls: true,
       externalWorkspaces: {},
       profiles: {
         research: { tools: ["read", "write"], approvalMode: "write" },
@@ -65,9 +69,12 @@ rl.on("line", line => {
     const secondRecord = await manager.start(second, "research", "another-topic");
     await manager.prompt({ ...first, threadRootId: firstRecord.rootEventId }, "alpha");
     await manager.prompt({ ...second, threadRootId: secondRecord.rootEventId }, "beta");
+    await manager.prompt({ ...first, threadRootId: firstRecord.rootEventId }, "tool-only");
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(replies.some((reply) => reply.workspace === "nomadmade" && reply.text.startsWith("reply:alpha"))).toBe(true);
     expect(replies.some((reply) => reply.workspace === "another-topic" && reply.text.startsWith("reply:beta"))).toBe(true);
+    expect(replies.some((reply) => reply.text.includes("raw-tool-secret") || reply.text.includes("secret_tool"))).toBe(false);
+    expect(replies.some((reply) => reply.text === "")).toBe(false);
     expect(firstRecord.sessionDir).not.toBe(secondRecord.sessionDir);
     const firstTranscript = readFileSync(join(firstRecord.workspacePath, ".courier", "transcript.md"), "utf-8");
     const secondTranscript = readFileSync(join(secondRecord.workspacePath, ".courier", "transcript.md"), "utf-8");

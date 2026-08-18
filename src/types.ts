@@ -42,6 +42,15 @@ export interface ExternalWorkspaceConfig {
   path: string;
 }
 
+export interface RunReportingConfig {
+  /** Send an in-thread usage summary at this cadence while a run is active. Zero or absent disables periodic summaries. */
+  intervalSeconds?: number;
+  /** Send plain-language task-stage start and completion updates. */
+  readableProgress?: boolean;
+  /** Send one final per-model usage summary when the run settles. */
+  finalUsage?: boolean;
+}
+
 /**
  * Configuration for pi-courier
  */
@@ -78,6 +87,7 @@ export interface MsgBridgeConfig {
   maxWorkers?: number;
   idleTimeoutSeconds?: number;
   approvalTimeoutSeconds?: number;
+  runReporting?: RunReportingConfig;
   profiles?: Record<string, OmpProfileConfig>;
   externalWorkspaces?: Record<string, ExternalWorkspaceConfig>;
   authBroker?: {
