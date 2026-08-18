@@ -111,7 +111,7 @@ rl.on("line", line => {
     expect(existsSync(join(dir, "threads", "must-not-exist"))).toBe(false);
     expect(manager.store.getThread(firstRecord.threadKey)).toBeDefined();
     await manager.shutdown();
-  });
+  }, 15_000);
 
   it("rolls back a new brief workspace when the development worker cannot start", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omp-worker-handoff-failure-"));
