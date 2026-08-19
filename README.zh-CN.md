@@ -11,6 +11,7 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
                     |             |
                     |             +-- 一个持久化 OMP 会话
                     +-- 一个命名 /srv/threads 工作区租约
+                                  +-- 可选的持久 LXD Bash 虚拟机
 ```
 
 - Matrix room ID 和线程根 event ID 构成会话键。
@@ -20,12 +21,13 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
 - 用户和助手文本会镜像到每个工作区的 `.courier/transcript.md`，便于通过 SSH 查看。
 - `courierctl watch` 可并发只读查看 RPC 输出。
 - `courierctl attach` 会暂停 Matrix 所有权，并用 OMP 原生 TUI 恢复同一会话。
+- profile 可让 OMP 和文件工具保留在主机，同时把 lead 与子代理的所有 Bash 调用路由到持久、空闲时停止的 LXD 虚拟机。
 
 ## Matrix 命令
 
 ```text
 !start research nomadmade Research product ideas and write a report
-!start development repo:starbug Inspect the cluster repository
+!start host-development repo:starbug Inspect the cluster repository
 !start development nomadbuild --brief nomadchef-ai/development-briefs/nomadbuild.md
 !continue nomadmade
 !new [profile]
@@ -82,12 +84,27 @@ Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更�
     "readableProgress": true,
     "finalUsage": true
   },
+  "runtimes": {
+    "development-vm": {
+      "type": "lxd-vm",
+      "remote": "omp-development",
+      "project": "omp-development",
+      "image": "omp-development-20260819-1",
+      "profile": "omp-development-vm",
+      "guestWorkspace": "/workspace",
+      "user": 995,
+      "group": 988,
+      "maxRunning": 3
+    }
+  },
   "profiles": {
     "development": {
       "tools": ["read", "write", "edit", "bash", "task"],
       "approvalMode": "write",
       "statusFile": ".courier/development/status.md",
-      "matrixUpdatesFromStatus": true
+      "matrixUpdatesFromStatus": true,
+      "runtime": "development-vm",
+      "workspaceKinds": ["managed"]
     }
   }
 }
@@ -106,9 +123,19 @@ courierctl resume nomadmade "Continue from the current recorded gate."
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
+courierctl env list
+courierctl env status nomadmade
+courierctl env start nomadmade
+courierctl env shell nomadmade
+courierctl env stop nomadmade
+courierctl env rebuild nomadmade --confirm nomadmade
+courierctl env destroy nomadmade --confirm nomadmade
+courierctl env tunnel-command nomadmade 8080 18080
 ```
 
 `watch` 是并发只读的精简事件视图，不是完整的 OMP 交互界面。默认情况下，它会把助手文本中的字面 `\n` 和 `\r\n` 渲染成换行，即使转义序列被拆分到多个流式 frame 中也能处理。需要查看精确原始流时使用 `--raw`。`resume` 会通过原有的 Matrix 所属 worker 重启已停止的工作区，因此可读进度和定期用量仍会发送到线程。`attach` 提供完整原生 TUI，因此会独占工作区直到退出；独占期间 Matrix 进度和用量报告不可用。
+
+`env shell` 会启动工作区虚拟机供运维人员使用，并在 shell 退出后停止它。重建和销毁必须用工作区名称显式确认，两者都会保留主机上的工作区文件。`tunnel-command` 只为正在运行的虚拟机打印 SSH 本地转发命令，不会自行打开监听端口。
 
 当 profile 启用 `matrixUpdatesFromStatus` 时，Courier 会投影工作区内的 `statusFile`，而不是转发 lead agent 的原始回合文本。优先使用精简的 `## Matrix update` 项目符号块，并在下一个标题或空行块边界处结束；旧文件则退回显示 `Status`、`Current gate` 和 `Updated` 字段。工作区外的文件、非普通文件以及大于 256 KiB 的文件都会被忽略。相同的投影也会显示在定期的按模型用量报告中。令牌总数采用提供商报告的处理量，并细分为输入、缓存读取/写入和输出，以便看清长上下文的缓存活动。
 
@@ -138,6 +165,6 @@ npm run build
 
 ## 安全边界
 
-OMP Courier 必须使用非特权账号运行。Linux 权限和 systemd sandbox 才是安全边界；OMP 工具列表与审批模式只是策略保护，不是沙箱。不要向服务账号暴露 root 凭据、kubeconfig 或宽泛的主目录权限。
+OMP Courier 必须使用非特权账号运行。LXD runtime 应只授予 project 范围的细粒度 TLS 身份，绝不能把 Courier 加入 `lxd` 组或主机 Docker 组。project 只允许挂载托管工作区根目录，并阻止虚拟机访问主机、局域网、集群、元数据和其他私有网络。OMP 工具列表与审批模式仍是策略保护；命令隔离由虚拟机、project 和网络边界提供。
 
 MIT 许可，参见 [LICENSE](LICENSE)。

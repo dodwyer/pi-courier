@@ -27,7 +27,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           mkdir -p release/omp-courier
-          cp -a dist node_modules package.json LICENSE README.md README.zh-CN.md release/omp-courier/
+          cp -a dist extensions node_modules package.json LICENSE README.md README.zh-CN.md release/omp-courier/
           tar -C release -czf "omp-courier-${TAG}-linux-x64.tar.gz" omp-courier
           sha256sum "omp-courier-${TAG}-linux-x64.tar.gz" > "omp-courier-${TAG}-linux-x64.tar.gz.sha256"
       - name: Publish GitHub release

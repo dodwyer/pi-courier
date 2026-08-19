@@ -61,9 +61,17 @@ export class CourierRouter {
       case "!status":
         await this.withError(msg, async () => {
           const record = this.deps.workers.status(msg);
+          const runtime = await this.deps.workers.runtimeStatus(record);
           await this.reply(
             msg,
-            [`Workspace: **${record.workspace}**`, `Profile: **${record.profile}**`, `State: **${record.status}**`, `Path: \`${record.workspacePath}\``, `Session: \`${record.sessionFile ?? "not created yet"}\``].join("\n"),
+            [
+              `Workspace: **${record.workspace}**`,
+              `Profile: **${record.profile}**`,
+              `Agent: **${record.status}**`,
+              ...(runtime ? [`Environment: **${runtime.state}** (\`${runtime.instance}\`, workspace \`${runtime.guestWorkspace}\`)`] : ["Environment: **host**"]),
+              `Path: \`${record.workspacePath}\``,
+              `Session: \`${record.sessionFile ?? "not created yet"}\``,
+            ].join("\n"),
             record.rootEventId,
           );
         });

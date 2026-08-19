@@ -40,7 +40,36 @@ export interface OmpProfileConfig {
   statusFile?: string;
   /** Prefer the status-file projection over forwarding raw lead-agent turn text to Matrix. */
   matrixUpdatesFromStatus?: boolean;
+  /** Named execution runtime used for shell commands in this profile. */
+  runtime?: string;
+  /** Optional workspace-kind boundary for host-only or managed-only profiles. */
+  workspaceKinds?: Array<"managed" | "external">;
 }
+
+export interface LxdVmRuntimeConfig {
+  type: "lxd-vm";
+  /** LXC client remote backed by a restricted TLS identity. */
+  remote: string;
+  /** Restricted LXD project containing only Courier development VMs. */
+  project: string;
+  /** Project-local golden image alias or fingerprint. */
+  image: string;
+  /** LXD profile applied when a workspace VM is first created. */
+  profile?: string;
+  /** Workspace mount point inside the VM. */
+  guestWorkspace?: string;
+  /** Numeric guest identity used for commands. */
+  user?: number;
+  group?: number;
+  /** Hard cap across running instances in this runtime. */
+  maxRunning?: number;
+  /** Override used by tests or non-standard LXC installations. */
+  commandPath?: string;
+  sshUser?: string;
+  sshIdentityFile?: string;
+}
+
+export type ExecutionRuntimeConfig = LxdVmRuntimeConfig;
 
 export interface ExternalWorkspaceConfig {
   path: string;
@@ -92,6 +121,7 @@ export interface MsgBridgeConfig {
   idleTimeoutSeconds?: number;
   approvalTimeoutSeconds?: number;
   runReporting?: RunReportingConfig;
+  runtimes?: Record<string, ExecutionRuntimeConfig>;
   profiles?: Record<string, OmpProfileConfig>;
   externalWorkspaces?: Record<string, ExternalWorkspaceConfig>;
   authBroker?: {

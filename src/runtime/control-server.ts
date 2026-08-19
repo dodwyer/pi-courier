@@ -9,6 +9,9 @@ interface ControlRequest {
   workspace?: string;
   abort?: boolean;
   message?: string;
+  confirmation?: string;
+  guestPort?: number;
+  localPort?: number;
 }
 
 export class ControlServer {
@@ -99,11 +102,12 @@ export class ControlServer {
             ompCliPath: this.config.ompCliPath,
             profile,
             authBroker: this.config.authBroker,
+            runtimeEnvironment: await this.workers.runtimeEnvironment(thread),
           });
         }
         case "release": {
           const workspace = requiredWorkspace(request);
-          this.workers.releaseWorkspace(workspace);
+          await this.workers.releaseWorkspace(workspace);
           return this.respond(socket, { ok: true });
         }
         case "resume": {
@@ -123,6 +127,36 @@ export class ControlServer {
           socket.once("close", unsubscribe);
           return;
         }
+        case "env-list":
+          return this.respond(socket, { ok: true, environments: await this.workers.environmentList() });
+        case "env-status":
+          return this.respond(socket, { ok: true, environment: await this.workers.environmentStatus(requiredWorkspace(request)) });
+        case "env-start":
+          return this.respond(socket, { ok: true, environment: await this.workers.environmentStart(requiredWorkspace(request)) });
+        case "env-stop":
+          return this.respond(socket, { ok: true, environment: await this.workers.environmentStop(requiredWorkspace(request)) });
+        case "env-shell": {
+          const shell = await this.workers.environmentShell(requiredWorkspace(request));
+          return this.respond(socket, { ok: true, shell });
+        }
+        case "env-rebuild": {
+          const workspace = requiredWorkspace(request);
+          requireConfirmation(request, workspace);
+          return this.respond(socket, { ok: true, environment: await this.workers.environmentRebuild(workspace) });
+        }
+        case "env-destroy": {
+          const workspace = requiredWorkspace(request);
+          requireConfirmation(request, workspace);
+          await this.workers.environmentDestroy(workspace);
+          return this.respond(socket, { ok: true });
+        }
+        case "env-tunnel-command": {
+          const workspace = requiredWorkspace(request);
+          return this.respond(socket, {
+            ok: true,
+            tunnelCommand: await this.workers.environmentTunnelCommand(workspace, Number(request.guestPort), request.localPort),
+          });
+        }
         default:
           throw new Error("Unknown control command");
       }
@@ -135,6 +169,12 @@ export class ControlServer {
     socket.write(`${JSON.stringify(response)}\n`, () => {
       if (close) socket.end();
     });
+  }
+}
+
+function requireConfirmation(request: ControlRequest, workspace: string): void {
+  if (request.confirmation !== workspace) {
+    throw new Error(`Destructive environment action requires --confirm ${workspace}`);
   }
 }
 

@@ -5,6 +5,7 @@ import { type AssistantMessage, extractTextFromMessage, formatToolCalls, splitMe
 import { logger } from "../logger.js";
 import { PiRpc, type RpcFrame } from "../rpc/pi-rpc.js";
 import type { ExternalMessage, MsgBridgeConfig, OmpProfileConfig, ReplyContext } from "../types.js";
+import { LxdRuntimeManager, type RuntimeEnvironmentStatus, type RuntimeShellCommand } from "./lxd-runtime.js";
 import { RunReporter } from "./run-reporter.js";
 import { StateStore, type ThreadRecord } from "./state-store.js";
 import { TranscriptWriter } from "./transcript-writer.js";
@@ -52,6 +53,7 @@ const BRIEF_HANDOFF_PROMPT = [
 export class WorkerManager {
   readonly store: StateStore;
   readonly workspaces: WorkspaceManager;
+  readonly runtimes: LxdRuntimeManager;
   readonly transcripts = new TranscriptWriter();
   private readonly workers = new Map<string, LiveWorker>();
   private readonly interactions = new Map<string, PendingInteraction>();
@@ -66,6 +68,7 @@ export class WorkerManager {
       deps.config.externalWorkspaces ?? {},
       this.store,
     );
+    this.runtimes = new LxdRuntimeManager(deps.config);
     this.idleTimer = setInterval(() => void this.evictIdle(), 30_000);
     this.idleTimer.unref();
   }
@@ -81,6 +84,7 @@ export class WorkerManager {
     const threadKey = makeThreadKey(msg.chatId, rootEventId);
     if (this.store.getThread(threadKey)) throw new Error("This Matrix thread is already initialized");
     const workspace = this.workspaces.resolve(workspaceName, true);
+    this.validateProfileWorkspace(profileName, profile, workspace);
     const sessionDir = path.join(required(this.deps.config.stateDir, "stateDir"), "sessions", threadId(threadKey));
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
     const record: ThreadRecord = {
@@ -120,6 +124,7 @@ export class WorkerManager {
       return record;
     } catch (err) {
       await this.stopWorker(threadKey).catch(() => {});
+      await this.runtimes.destroy(this.profile(profileName), handoff.workspace).catch(() => {});
       this.store.releaseWorkspace(workspaceName, threadKey);
       this.store.deleteThread(threadKey);
       this.workspaces.rollbackCreatedWorkspace(handoff.workspace);
@@ -146,6 +151,7 @@ export class WorkerManager {
       status: "starting",
       lastActivity: Date.now(),
     };
+    this.validateProfileWorkspace(record.profile, this.profile(record.profile), workspace);
     this.store.upsertThread(record);
     await this.ensureWorker(record, this.profile(record.profile));
     return this.store.getThread(threadKey)!;
@@ -206,6 +212,9 @@ export class WorkerManager {
       return worker.record;
     }
     const profile = this.profile(profileName);
+    const workspace = this.store.getWorkspace(worker.record.workspace);
+    if (!workspace) throw new Error(`Workspace ${worker.record.workspace} is not registered`);
+    this.validateProfileWorkspace(profileName, profile, workspace);
     await this.stopWorker(worker.record.threadKey);
     worker.record.profile = profileName;
     worker.record.sessionDir = path.join(required(this.deps.config.stateDir, "stateDir"), "sessions", `${threadId(worker.record.threadKey)}-${Date.now()}`);
@@ -268,17 +277,81 @@ export class WorkerManager {
     const worker = this.workers.get(threadKey);
     if (worker?.busy && !abort) throw new Error("OMP is busy; wait for idle or attach with --abort");
     if (worker?.busy && abort) await worker.rpc.abort();
-    await this.stopWorker(threadKey, "attached");
+    await this.stopWorker(threadKey, "attached", true);
+    await this.runtimes.ensure(this.profile(record.profile), workspace);
     this.store.acquireOperatorLease(name, `ssh:${process.pid}`);
     this.store.setThreadStatus(threadKey, "attached");
     return { ...(this.store.getThread(threadKey) ?? record), status: "attached" };
   }
 
-  releaseWorkspace(name: string): void {
+  async releaseWorkspace(name: string): Promise<void> {
     const workspace = this.store.getWorkspace(name);
     if (!workspace?.activeThreadKey?.startsWith("ssh:")) throw new Error(`Workspace ${name} is not leased over SSH`);
     this.store.releaseWorkspace(name, workspace.activeThreadKey);
     if (workspace.lastThreadKey) this.store.setThreadStatus(workspace.lastThreadKey, "stopped");
+    const target = this.environmentTarget(name);
+    await this.runtimes.stop(target.profile, target.workspace);
+  }
+
+  async environmentList(): Promise<RuntimeEnvironmentStatus[]> {
+    return this.runtimes.list();
+  }
+
+  async environmentStatus(name: string): Promise<RuntimeEnvironmentStatus> {
+    const target = this.environmentTarget(name);
+    const status = await this.runtimes.status(target.profile, target.workspace);
+    if (!status) throw new Error(`Workspace ${name} does not use an isolated runtime`);
+    return status;
+  }
+
+  async environmentStart(name: string): Promise<RuntimeEnvironmentStatus> {
+    const target = this.environmentTarget(name);
+    await this.runtimes.ensure(target.profile, target.workspace);
+    return (await this.runtimes.status(target.profile, target.workspace))!;
+  }
+
+  async environmentStop(name: string): Promise<RuntimeEnvironmentStatus> {
+    const target = this.environmentTarget(name);
+    const active = target.workspace.activeThreadKey;
+    if (active && !active.startsWith("ssh:")) {
+      const worker = this.workers.get(active);
+      if (worker?.busy) throw new Error(`Workspace ${name} is busy; abort or wait before stopping its VM`);
+      await this.stopWorker(active);
+    } else {
+      await this.runtimes.stop(target.profile, target.workspace);
+    }
+    return (await this.runtimes.status(target.profile, target.workspace))!;
+  }
+
+  async environmentRebuild(name: string): Promise<RuntimeEnvironmentStatus> {
+    const target = await this.prepareEnvironmentMutation(name);
+    return this.runtimes.rebuild(target.profile, target.workspace);
+  }
+
+  async environmentDestroy(name: string): Promise<void> {
+    const target = await this.prepareEnvironmentMutation(name);
+    await this.runtimes.destroy(target.profile, target.workspace);
+  }
+
+  async environmentShell(name: string): Promise<RuntimeShellCommand> {
+    const target = this.environmentTarget(name);
+    if (target.workspace.activeThreadKey) throw new Error(`Workspace ${name} is active; stop or attach its OMP session first`);
+    return this.runtimes.shellCommand(target.profile, target.workspace);
+  }
+
+  async environmentTunnelCommand(name: string, guestPort: number, localPort?: number): Promise<string> {
+    const target = this.environmentTarget(name);
+    return this.runtimes.tunnelCommand(target.profile, target.workspace, guestPort, localPort);
+  }
+
+  async runtimeStatus(record: ThreadRecord): Promise<RuntimeEnvironmentStatus | undefined> {
+    const workspace = this.store.getWorkspace(record.workspace);
+    return workspace ? this.runtimes.status(this.profile(record.profile), workspace) : undefined;
+  }
+
+  async runtimeEnvironment(record: ThreadRecord): Promise<NodeJS.ProcessEnv> {
+    const workspace = this.store.getWorkspace(record.workspace);
+    return workspace ? this.runtimes.ensure(this.profile(record.profile), workspace) : {};
   }
 
   async shutdown(): Promise<void> {
@@ -312,7 +385,9 @@ export class WorkerManager {
       ...((profile.configFiles ?? []).flatMap((file) => ["--config", file])),
       ...(record.sessionFile ? ["--resume", record.sessionFile] : []),
     ];
-    const env: NodeJS.ProcessEnv = {};
+    const workspace = this.store.getWorkspace(record.workspace);
+    if (!workspace) throw new Error(`Workspace ${record.workspace} is not registered`);
+    const env: NodeJS.ProcessEnv = await this.runtimes.ensure(profile, workspace);
     if (this.deps.config.authBroker) {
       env.OMP_AUTH_BROKER_URL = this.deps.config.authBroker.url;
       env.OMP_AUTH_BROKER_TOKEN = fs.readFileSync(this.deps.config.authBroker.tokenFile, "utf-8").trim();
@@ -353,6 +428,7 @@ export class WorkerManager {
       await this.refreshState(worker);
       return worker;
     } catch (err) {
+      await this.runtimes.stop(profile, workspace).catch(() => {});
       this.store.releaseWorkspace(record.workspace, record.threadKey);
       this.store.setThreadStatus(record.threadKey, "failed");
       throw err;
@@ -402,13 +478,18 @@ export class WorkerManager {
       case "extension_ui_request":
         await this.handleUiRequest(worker, frame);
         return;
-      case "process_exit":
+      case "process_exit": {
+        const ownsRuntime = this.workers.get(worker.record.threadKey) === worker;
         worker.reporter.close();
         this.clearInteractions(worker.record.threadKey);
         this.workers.delete(worker.record.threadKey);
         this.store.releaseWorkspace(worker.record.workspace, worker.record.threadKey);
         this.store.setThreadStatus(worker.record.threadKey, "stopped");
+        if (ownsRuntime) await this.stopRuntime(worker.record).catch((err) => {
+          logger.warn(`[courier] failed to stop runtime for ${worker.record.workspace}: ${(err as Error).message}`);
+        });
         return;
+      }
     }
   }
 
@@ -478,7 +559,7 @@ export class WorkerManager {
     }
   }
 
-  private async stopWorker(threadKey: string, status = "stopped"): Promise<void> {
+  private async stopWorker(threadKey: string, status = "stopped", preserveRuntime = false): Promise<void> {
     this.clearInteractions(threadKey);
     const worker = this.workers.get(threadKey);
     if (!worker) {
@@ -486,6 +567,7 @@ export class WorkerManager {
       if (record) {
         this.store.releaseWorkspace(record.workspace, threadKey);
         this.store.setThreadStatus(threadKey, status, record.sessionFile);
+        if (!preserveRuntime) await this.stopRuntime(record);
       }
       return;
     }
@@ -495,6 +577,36 @@ export class WorkerManager {
     await worker.rpc.stop();
     this.store.releaseWorkspace(worker.record.workspace, threadKey);
     this.store.setThreadStatus(threadKey, status, worker.record.sessionFile);
+    if (!preserveRuntime) await this.stopRuntime(worker.record);
+  }
+
+  private async stopRuntime(record: ThreadRecord): Promise<void> {
+    const workspace = this.store.getWorkspace(record.workspace);
+    if (workspace) await this.runtimes.stop(this.profile(record.profile), workspace);
+  }
+
+  private environmentTarget(name: string): { workspace: import("./state-store.js").WorkspaceRecord; profile: OmpProfileConfig } {
+    const workspace = this.workspaces.resolve(name, false);
+    const previous = this.store.getLastThreadForWorkspace(name);
+    if (previous) {
+      const profile = this.profile(previous.profile);
+      if (profile.runtime) return { workspace, profile };
+    }
+    const candidate = Object.values(this.deps.config.profiles ?? {}).find((profile) => profile.runtime);
+    if (!candidate) throw new Error("No isolated runtime profile is configured");
+    return { workspace, profile: candidate };
+  }
+
+  private async prepareEnvironmentMutation(name: string): Promise<{ workspace: import("./state-store.js").WorkspaceRecord; profile: OmpProfileConfig }> {
+    const target = this.environmentTarget(name);
+    const active = target.workspace.activeThreadKey;
+    if (active?.startsWith("ssh:")) throw new Error(`Workspace ${name} is attached over SSH`);
+    if (active) {
+      const worker = this.workers.get(active);
+      if (worker?.busy) throw new Error(`Workspace ${name} is busy; abort or wait before rebuilding its VM`);
+      await this.stopWorker(active);
+    }
+    return target;
   }
 
   private workerForMessage(msg: ExternalMessage): LiveWorker {
@@ -509,6 +621,16 @@ export class WorkerManager {
     const profile = this.deps.config.profiles?.[name];
     if (!profile) throw new Error(`Unknown profile ${name}; choose ${Object.keys(this.deps.config.profiles ?? {}).join(", ")}`);
     return profile;
+  }
+
+  private validateProfileWorkspace(
+    profileName: string,
+    profile: OmpProfileConfig,
+    workspace: import("./state-store.js").WorkspaceRecord,
+  ): void {
+    if (profile.workspaceKinds && !profile.workspaceKinds.includes(workspace.kind)) {
+      throw new Error(`Profile ${profileName} does not permit ${workspace.kind} workspaces`);
+    }
   }
 
   private pendingInteraction(

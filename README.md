@@ -11,6 +11,7 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
                      |             |
                      |             +-- one persisted OMP session
                      +-- one named /srv/threads workspace lease
+                                   +-- optional persistent LXD VM for Bash
 ```
 
 - Matrix room and thread-root event IDs form the conversation key.
@@ -20,12 +21,13 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 - User and assistant text is mirrored to `.courier/transcript.md` inside each workspace for SSH review.
 - `courierctl watch` observes RPC events concurrently.
 - `courierctl attach` pauses Matrix ownership and resumes the exact session in OMP's native TUI.
+- A profile can keep OMP and file tools on the host while routing every lead and subagent Bash call into a persistent, idle-stopped LXD VM.
 
 ## Matrix commands
 
 ```text
 !start research nomadmade Research product ideas and write a report
-!start development repo:starbug Inspect the cluster repository
+!start host-development repo:starbug Inspect the cluster repository
 !start development nomadbuild --brief nomadchef-ai/development-briefs/nomadbuild.md
 !continue nomadmade
 !new [profile]
@@ -97,12 +99,27 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
     "readableProgress": true,
     "finalUsage": true
   },
+  "runtimes": {
+    "development-vm": {
+      "type": "lxd-vm",
+      "remote": "omp-development",
+      "project": "omp-development",
+      "image": "omp-development-20260819-1",
+      "profile": "omp-development-vm",
+      "guestWorkspace": "/workspace",
+      "user": 995,
+      "group": 988,
+      "maxRunning": 3
+    }
+  },
   "profiles": {
     "development": {
       "tools": ["read", "write", "edit", "bash", "task"],
       "approvalMode": "write",
       "statusFile": ".courier/development/status.md",
-      "matrixUpdatesFromStatus": true
+      "matrixUpdatesFromStatus": true,
+      "runtime": "development-vm",
+      "workspaceKinds": ["managed"]
     }
   },
   "externalWorkspaces": {
@@ -128,9 +145,19 @@ courierctl resume nomadmade "Continue from the current recorded gate."
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
+courierctl env list
+courierctl env status nomadmade
+courierctl env start nomadmade
+courierctl env shell nomadmade
+courierctl env stop nomadmade
+courierctl env rebuild nomadmade --confirm nomadmade
+courierctl env destroy nomadmade --confirm nomadmade
+courierctl env tunnel-command nomadmade 8080 18080
 ```
 
 `watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `resume` restarts a stopped workspace through its existing Matrix-owned worker, so readable progress and periodic usage continue to reach the thread. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits; Matrix progress and usage reporting are unavailable during that lease.
+
+`env shell` starts the workspace VM for an operator shell and stops it on exit. Rebuild and destroy require the workspace name as an explicit confirmation; both retain the host workspace files. `tunnel-command` prints an SSH local-forward command for a running VM and does not open a listener itself.
 
 When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A compact `## Matrix update` bullet block is preferred and ends at the next heading or blank-line block boundary; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports. Token totals are provider-reported processing totals and are broken down into input, cache reads/writes, and output so long-context cache activity is visible.
 
@@ -169,6 +196,6 @@ The code uses Node's built-in SQLite API. Node 24 currently prints an experiment
 
 ## Security boundary
 
-OMP Courier must run as an unprivileged account. Linux permissions and systemd sandboxing are the security boundary; OMP tool lists and approval modes are policy guardrails, not a sandbox. Do not expose root credentials, kubeconfigs, or broad home-directory access to the service account.
+OMP Courier must run as an unprivileged account. For LXD runtimes, give it a fine-grained project-scoped TLS identity, never membership in the `lxd` group or the host Docker group. The project must restrict disk mounts to the managed workspace root and restrict VM egress away from host, LAN, cluster, metadata, and other private networks. OMP tool lists and approval modes remain policy guardrails; the VM/project/network boundary provides command isolation.
 
 MIT licensed. See [LICENSE](LICENSE).

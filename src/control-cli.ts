@@ -56,6 +56,10 @@ async function request(command: Record<string, unknown>, renderer?: ActivityRend
 
 async function main(): Promise<void> {
   const [command, workspace, ...rest] = process.argv.slice(2);
+  if (command === "env") {
+    await environmentCommand(workspace, rest);
+    return;
+  }
   switch (command) {
     case "list": {
       const [response] = await request({ command: "list" });
@@ -88,7 +92,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.log("Usage: courierctl list | status <workspace> | watch <workspace> [--raw] | resume <workspace> <message...> | attach <workspace> [--abort] | adopt <workspace>");
+      usage();
       process.exitCode = 2;
   }
 }
@@ -110,6 +114,8 @@ async function attach(workspace: string | undefined, abort: boolean): Promise<vo
     ...((profile?.configFiles ?? []).flatMap((file) => ["--config", file])),
   ];
   const env = { ...process.env };
+  const runtimeEnvironment = response.runtimeEnvironment as Record<string, string> | undefined;
+  Object.assign(env, runtimeEnvironment ?? {});
   const authBroker = response.authBroker as { url?: string; tokenFile?: string } | undefined;
   if (authBroker?.url && authBroker.tokenFile) {
     env.OMP_AUTH_BROKER_URL = authBroker.url;
@@ -124,6 +130,88 @@ async function attach(workspace: string | undefined, abort: boolean): Promise<vo
   } finally {
     await request({ command: "release", workspace });
   }
+}
+
+async function environmentCommand(action: string | undefined, args: string[]): Promise<void> {
+  const [workspace, ...rest] = args;
+  switch (action) {
+    case "list": {
+      if (args.length) throw new Error("Usage: courierctl env list");
+      const [response] = await request({ command: "env-list" });
+      const environments = response.environments as Array<Record<string, unknown>>;
+      if (!environments.length) {
+        console.log("No isolated workspace environments exist.");
+        return;
+      }
+      for (const environment of environments) {
+        console.log(`${environment.workspace}\t${environment.state}\t${environment.instance}\t${environment.runtime}`);
+      }
+      return;
+    }
+    case "status":
+    case "start":
+    case "stop": {
+      if (!workspace || rest.length) throw new Error(`Usage: courierctl env ${action} <workspace>`);
+      const [response] = await request({ command: `env-${action}`, workspace });
+      console.log(JSON.stringify(response.environment, null, 2));
+      return;
+    }
+    case "shell": {
+      if (!workspace || rest.length) throw new Error("Usage: courierctl env shell <workspace>");
+      const [response] = await request({ command: "env-shell", workspace });
+      const shell = response.shell as { command: string; args: string[]; env?: Record<string, string> };
+      console.log(`Opening ${workspace}'s isolated VM. Exit the shell to return it to the stopped state.`);
+      try {
+        const result = spawnSync(shell.command, shell.args, { env: { ...process.env, ...(shell.env ?? {}) }, stdio: "inherit" });
+        if (result.error) throw result.error;
+        if (result.status !== 0) process.exitCode = result.status ?? 1;
+      } finally {
+        await request({ command: "env-stop", workspace });
+      }
+      return;
+    }
+    case "rebuild":
+    case "destroy": {
+      if (!workspace || rest.length !== 2 || rest[0] !== "--confirm") {
+        throw new Error(`Usage: courierctl env ${action} <workspace> --confirm <workspace>`);
+      }
+      const [response] = await request({ command: `env-${action}`, workspace, confirmation: rest[1] });
+      if (action === "rebuild") console.log(JSON.stringify(response.environment, null, 2));
+      else console.log(`Destroyed ${workspace}'s VM. Workspace files were retained.`);
+      return;
+    }
+    case "tunnel-command": {
+      if (!workspace || rest.length < 1 || rest.length > 2) {
+        throw new Error("Usage: courierctl env tunnel-command <workspace> <guest-port> [local-port]");
+      }
+      const guestPort = parsePort(rest[0]);
+      const localPort = rest[1] ? parsePort(rest[1]) : guestPort;
+      const [response] = await request({ command: "env-tunnel-command", workspace, guestPort, localPort });
+      console.log(String(response.tunnelCommand));
+      return;
+    }
+    default:
+      usage();
+      process.exitCode = 2;
+  }
+}
+
+function parsePort(value: string): number {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("ports must be integers between 1 and 65535");
+  return port;
+}
+
+function usage(): void {
+  console.log([
+    "Usage:",
+    "  courierctl list | status <workspace> | watch <workspace> [--raw]",
+    "  courierctl resume <workspace> <message...> | attach <workspace> [--abort] | adopt <workspace>",
+    "  courierctl env list",
+    "  courierctl env status|start|shell|stop <workspace>",
+    "  courierctl env rebuild|destroy <workspace> --confirm <workspace>",
+    "  courierctl env tunnel-command <workspace> <guest-port> [local-port]",
+  ].join("\n"));
 }
 
 main().catch((err) => {
