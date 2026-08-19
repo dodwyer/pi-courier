@@ -171,8 +171,7 @@ export class WorkerManager {
     if (workspace.activeThreadKey?.startsWith("ssh:")) {
       throw new Error(`Workspace ${name} is attached over SSH; exit the native TUI before resuming through Matrix`);
     }
-    const threadKey = workspace.lastThreadKey;
-    const record = threadKey ? this.store.getThread(threadKey) : undefined;
+    const record = this.store.getLastThreadForWorkspace(name);
     if (!record) throw new Error(`Workspace ${name} has no resumable Matrix thread`);
     const worker = await this.ensureWorker(record, this.profile(record.profile));
     if (worker.busy) throw new Error(`Workspace ${name} is already running; monitor it with courierctl watch ${name}`);
@@ -270,7 +269,7 @@ export class WorkerManager {
     if (worker?.busy && !abort) throw new Error("OMP is busy; wait for idle or attach with --abort");
     if (worker?.busy && abort) await worker.rpc.abort();
     await this.stopWorker(threadKey, "attached");
-    this.store.acquireWorkspace(name, `ssh:${process.pid}`);
+    this.store.acquireOperatorLease(name, `ssh:${process.pid}`);
     this.store.setThreadStatus(threadKey, "attached");
     return { ...(this.store.getThread(threadKey) ?? record), status: "attached" };
   }

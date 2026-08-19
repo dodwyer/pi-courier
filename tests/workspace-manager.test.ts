@@ -49,6 +49,40 @@ describe("WorkspaceManager", () => {
     expect(() => store.acquireWorkspace("nomadmade", "thread-b")).not.toThrow();
   });
 
+  it("preserves and repairs the last Matrix thread across an SSH operator lease", () => {
+    const manager = new WorkspaceManager(root, {}, store);
+    const workspace = manager.resolve("nomadmade");
+    store.upsertThread({
+      threadKey: "matrix-thread",
+      roomId: "room",
+      rootEventId: "root",
+      transport: "matrix",
+      username: "operator",
+      workspace: workspace.name,
+      workspacePath: workspace.path,
+      profile: "development",
+      sessionDir: join(state, "session"),
+      sessionFile: join(state, "session.jsonl"),
+      status: "stopped",
+      lastActivity: Date.now(),
+    });
+    store.acquireWorkspace(workspace.name, "matrix-thread");
+    store.releaseWorkspace(workspace.name, "matrix-thread");
+    store.acquireOperatorLease(workspace.name, "ssh:123");
+    expect(store.getWorkspace(workspace.name)).toMatchObject({
+      activeThreadKey: "ssh:123",
+      lastThreadKey: "matrix-thread",
+    });
+    store.releaseWorkspace(workspace.name, "ssh:123");
+
+    // Simulate the pre-fix persisted state and verify startup repairs it.
+    store.acquireWorkspace(workspace.name, "ssh:legacy");
+    store.close();
+    store = new StateStore(state);
+    expect(store.getWorkspace(workspace.name)?.lastThreadKey).toBe("matrix-thread");
+    expect(store.getLastThreadForWorkspace(workspace.name)?.threadKey).toBe("matrix-thread");
+  });
+
   it("copies an approved brief into a clean managed workspace with provenance", () => {
     const manager = new WorkspaceManager(root, {}, store);
     const source = manager.resolve("research-source");

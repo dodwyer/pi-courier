@@ -59,7 +59,18 @@ export class StateStore {
       CREATE UNIQUE INDEX IF NOT EXISTS threads_room_root ON threads(room_id, root_event_id);
     `);
     // A process restart terminates every child, so no persisted lease remains active.
-    this.db.exec("UPDATE workspaces SET active_thread_key = NULL; UPDATE threads SET status = 'stopped' WHERE status != 'stopped';");
+    this.db.exec(`
+      UPDATE workspaces SET active_thread_key = NULL;
+      UPDATE threads SET status = 'stopped' WHERE status != 'stopped';
+      UPDATE workspaces
+      SET last_thread_key = (
+        SELECT thread_key FROM threads
+        WHERE threads.workspace = workspaces.name
+        ORDER BY last_activity DESC
+        LIMIT 1
+      )
+      WHERE last_thread_key LIKE 'ssh:%';
+    `);
   }
 
   close(): void {
@@ -101,6 +112,17 @@ export class StateStore {
     }
     this.db.prepare("UPDATE workspaces SET active_thread_key = ?, last_thread_key = ?, updated_at = ? WHERE name = ?")
       .run(threadKey, threadKey, Date.now(), name);
+  }
+
+  acquireOperatorLease(name: string, leaseKey: string): void {
+    if (!leaseKey.startsWith("ssh:")) throw new Error("Operator lease keys must start with ssh:");
+    const workspace = this.getWorkspace(name);
+    if (!workspace) throw new Error(`Workspace ${name} is not registered`);
+    if (workspace.activeThreadKey && workspace.activeThreadKey !== leaseKey) {
+      throw new Error(`Workspace ${name} is active in another Matrix thread (${workspace.activeThreadKey})`);
+    }
+    this.db.prepare("UPDATE workspaces SET active_thread_key = ?, updated_at = ? WHERE name = ?")
+      .run(leaseKey, Date.now(), name);
   }
 
   releaseWorkspace(name: string, threadKey: string): void {
@@ -151,7 +173,11 @@ export class StateStore {
 
   getLastThreadForWorkspace(name: string): ThreadRecord | undefined {
     const workspace = this.getWorkspace(name);
-    return workspace?.lastThreadKey ? this.getThread(workspace.lastThreadKey) : undefined;
+    const recorded = workspace?.lastThreadKey ? this.getThread(workspace.lastThreadKey) : undefined;
+    if (recorded) return recorded;
+    const row = this.db.prepare("SELECT * FROM threads WHERE workspace = ? ORDER BY last_activity DESC LIMIT 1")
+      .get(name) as Record<string, unknown> | undefined;
+    return row ? threadFromRow(row) : undefined;
   }
 
   listThreads(): ThreadRecord[] {
