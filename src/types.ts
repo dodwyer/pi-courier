@@ -61,6 +61,10 @@ export interface LxdVmRuntimeConfig {
   /** Numeric guest identity used for commands. */
   user?: number;
   group?: number;
+  /** Guest shell condition that must pass before the runtime is reported ready. */
+  readyCommand?: string;
+  /** Guest interface whose global IPv4 address is used for SSH tunnels. */
+  addressInterface?: string;
   /** Hard cap across running instances in this runtime. */
   maxRunning?: number;
   /** Override used by tests or non-standard LXC installations. */

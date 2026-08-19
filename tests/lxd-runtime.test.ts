@@ -35,8 +35,25 @@ describe("LxdRuntimeManager", () => {
     expect(commands).toContain('"init"');
     expect(commands).toContain('"device","add"');
     expect(commands).toContain('"start"');
+    expect(commands).toContain("test -S /var/run/docker.sock && systemctl is-active --quiet docker");
     expect(commands).toContain('"stop"');
     expect(commands).not.toContain('"delete"');
+  });
+
+  it("uses the declared guest interface rather than Docker for tunnels", async () => {
+    const fixture = runtimeFixture(dirs);
+    await fixture.manager.ensure(fixture.profile, fixture.workspace);
+    const instances = JSON.parse(readFileSync(fixture.state, "utf-8"));
+    instances[0].state = {
+      network: {
+        docker0: { addresses: [{ family: "inet", scope: "global", address: "172.17.0.1" }] },
+        enp5s0: { addresses: [{ family: "inet", scope: "global", address: "10.251.0.42" }] },
+      },
+    };
+    writeFileSync(fixture.state, JSON.stringify(instances));
+
+    await expect(fixture.manager.tunnelCommand(fixture.profile, fixture.workspace, 8000, 18000))
+      .resolves.toContain("developer@10.251.0.42");
   });
 
   it("rejects isolated runtimes for declared external workspaces", async () => {
@@ -52,6 +69,7 @@ function runtimeFixture(dirs: string[]): {
   profile: OmpProfileConfig;
   workspace: WorkspaceRecord;
   log: string;
+  state: string;
 } {
   const dir = mkdtempSync(join(tmpdir(), "courier-lxd-test-"));
   dirs.push(dir);
@@ -100,6 +118,8 @@ fs.writeFileSync(statePath, JSON.stringify(instances));
         image: "golden",
         profile: "development",
         commandPath: command,
+        readyCommand: "test -S /var/run/docker.sock && systemctl is-active --quiet docker",
+        addressInterface: "enp5s0",
       },
     },
   };
@@ -110,5 +130,5 @@ fs.writeFileSync(statePath, JSON.stringify(instances));
     kind: "managed",
     updatedAt: Date.now(),
   };
-  return { manager: new LxdRuntimeManager(config), config, profile, workspace, log };
+  return { manager: new LxdRuntimeManager(config), config, profile, workspace, log, state };
 }

@@ -210,7 +210,7 @@ export class LxdRuntimeManager {
     let lastError: Error | undefined;
     for (let attempt = 0; attempt < 60; attempt++) {
       try {
-        await this.run(runtime, [...execPrefix(runtime, instance, false), "true"]);
+        await this.run(runtime, [...execPrefix(runtime, instance, false), runtime.readyCommand ?? "true"]);
         return;
       } catch (error) {
         lastError = error as Error;
@@ -283,12 +283,18 @@ function toStatus(runtimeName: string, runtime: LxdVmRuntimeConfig, workspace: s
     instance: instance.name,
     state,
     guestWorkspace: runtime.guestWorkspace ?? "/workspace",
-    address: instanceAddress(instance),
+    address: instanceAddress(runtime, instance),
   };
 }
 
-function instanceAddress(instance: LxdInstance): string | undefined {
-  for (const network of Object.values(instance.state?.network ?? {})) {
+function instanceAddress(runtime: LxdVmRuntimeConfig, instance: LxdInstance): string | undefined {
+  const networks = instance.state?.network ?? {};
+  if (runtime.addressInterface) {
+    return networks[runtime.addressInterface]?.addresses
+      ?.find((candidate) => candidate.family === "inet" && candidate.scope === "global")?.address;
+  }
+  for (const [name, network] of Object.entries(networks)) {
+    if (name === "lo" || name.startsWith("docker") || name.startsWith("br-") || name.startsWith("veth")) continue;
     const address = network.addresses?.find((candidate) => candidate.family === "inet" && candidate.scope === "global")?.address;
     if (address) return address;
   }
