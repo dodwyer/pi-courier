@@ -57,6 +57,7 @@ describe("RunReporter", () => {
     expect(messages[1]).toContain("Run update · 10 minutes");
     expect(messages[1]).toContain("Claude Fable 5 (anthropic): ~1,000 (+1,000)");
     expect(messages[1]).toContain("GPT-5.6 Sol (openai-codex): 175 (+175)");
+    expect(messages[1]).toContain("100 input · 25 cache reads · 50 output");
     expect(messages[1]).toContain("1 read/search");
 
     now = 720_000;
@@ -159,5 +160,18 @@ describe("RunReporter", () => {
   it("falls back to concise status metadata for legacy status files", () => {
     expect(projectStatusMarkdown(`# Status\n\n- Status: task manifest accepted\n- Current gate: host preflight\n- Updated: now\n- Internal: noisy\n`))
       .toBe("📍 **Workspace status**\n• **Status:** task manifest accepted\n• **Current gate:** host preflight\n• **Updated:** now");
+  });
+
+  it("stops an unheaded legacy ledger after the Matrix update bullet block", () => {
+    expect(projectStatusMarkdown(`# Status
+
+## Matrix update
+
+- Current gate is host preflight.
+- Next: restore the reference checkout.
+
+- Historical planner identity: invalid
+- raw protocol detail
+`)).toBe("📍 **Workspace update**\n- Current gate is host preflight.\n- Next: restore the reference checkout.");
   });
 });

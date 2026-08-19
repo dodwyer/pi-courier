@@ -106,7 +106,7 @@ export class RunReporter {
       if (status) lines.push(status, "");
       else lines.push(`**Current work:** ${this.currentWork()}`);
     }
-    lines.push("**Model tokens — run total (since the last update)**");
+    lines.push("**Model tokens processed — run total (since the last update)**");
     if (rows.length === 0) {
       lines.push("• No completed model response has reported token usage yet.");
     } else {
@@ -114,7 +114,14 @@ export class RunReporter {
         const approximate = row.activeTokens > 0 ? "~" : "";
         const previous = this.lastReportedTotals.get(row.model) ?? 0;
         const delta = Math.max(0, row.totalTokens - previous);
-        lines.push(`• ${displayModel(row.model)}: ${approximate}${formatTokens(row.totalTokens)} (+${formatTokens(delta)})`);
+        const components = [
+          row.input > 0 ? `${formatTokens(row.input)} input` : undefined,
+          row.cacheRead > 0 ? `${formatTokens(row.cacheRead)} cache reads` : undefined,
+          row.cacheWrite > 0 ? `${formatTokens(row.cacheWrite)} cache writes` : undefined,
+          row.output > 0 ? `${formatTokens(row.output)} output` : undefined,
+          row.activeTokens > 0 ? `~${formatTokens(row.activeTokens)} live` : undefined,
+        ].filter((part): part is string => part !== undefined);
+        lines.push(`• ${displayModel(row.model)}: ${approximate}${formatTokens(row.totalTokens)} (+${formatTokens(delta)})${components.length > 0 ? ` · ${components.join(" · ")}` : ""}`);
         this.lastReportedTotals.set(row.model, row.totalTokens);
       }
     }
@@ -266,7 +273,7 @@ export class RunReporter {
     });
   }
 
-  private usageRows(): Array<{ model: string; totalTokens: number; activeTokens: number }> {
+  private usageRows(): Array<UsageTotals & { model: string; totalTokens: number; activeTokens: number }> {
     const activeByModel = new Map<string, number>();
     for (const usage of this.activeTaskUsage.values()) {
       activeByModel.set(usage.model, (activeByModel.get(usage.model) ?? 0) + usage.tokens);
@@ -275,7 +282,8 @@ export class RunReporter {
     return [...models]
       .map((model) => {
         const activeTokens = activeByModel.get(model) ?? 0;
-        return { model, activeTokens, totalTokens: (this.exactUsage.get(model)?.totalTokens ?? 0) + activeTokens };
+        const exact = this.exactUsage.get(model) ?? EMPTY_USAGE;
+        return { ...exact, model, activeTokens, totalTokens: exact.totalTokens + activeTokens };
       })
       .sort((a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model));
   }
@@ -311,7 +319,11 @@ export class RunReporter {
 
 export function projectStatusMarkdown(markdown: string): string | undefined {
   const normalized = markdown.replaceAll("\0", "�").replace(/\r\n?/g, "\n");
-  const explicit = normalized.match(/^## Matrix update\s*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/im)?.[1]?.trim();
+  const explicitSection = normalized.match(/^## Matrix update\s*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/im)?.[1];
+  // The profile contract makes this a compact bullet block. Stop at the first
+  // blank-line boundary as a defensive fallback for legacy ledgers that placed
+  // unheaded history immediately after the current Matrix update.
+  const explicit = explicitSection?.split(/\n\s*\n/, 1)[0]?.trim();
   if (explicit) return limitProjection(`📍 **Workspace update**\n${explicit}`);
 
   const fields = new Map<string, string>();

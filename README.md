@@ -132,7 +132,7 @@ courierctl adopt existing-directory
 
 `watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `resume` restarts a stopped workspace through its existing Matrix-owned worker, so readable progress and periodic usage continue to reach the thread. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits; Matrix progress and usage reporting are unavailable during that lease.
 
-When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A `## Matrix update` section is preferred; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports.
+When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A compact `## Matrix update` bullet block is preferred and ends at the next heading or blank-line block boundary; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports. Token totals are provider-reported processing totals and are broken down into input, cache reads/writes, and output so long-context cache activity is visible.
 
 ## Isolated E2E canary
 

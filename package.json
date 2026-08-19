@@ -1,6 +1,6 @@
 {
   "name": "pi-courier",
-  "version": "0.2.0-omp.9",
+  "version": "0.2.0-omp.10",
   "description": "Run Oh My Pi from isolated Matrix threads with named host workspaces.",
   "type": "module",
   "main": "dist/standalone.js",
