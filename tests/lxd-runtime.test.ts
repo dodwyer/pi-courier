@@ -64,6 +64,7 @@ const fs = require("node:fs");
 const statePath = ${JSON.stringify(state)};
 const logPath = ${JSON.stringify(log)};
 const args = process.argv.slice(2);
+fs.readFileSync(0, "utf8");
 fs.appendFileSync(logPath, JSON.stringify(args) + "\\n");
 const instances = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const target = args[0] === "init" ? args[2] : args.find(value => value.startsWith("test:"));

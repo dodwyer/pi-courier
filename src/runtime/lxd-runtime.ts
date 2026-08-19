@@ -1,11 +1,29 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import type { LxdVmRuntimeConfig, MsgBridgeConfig, OmpProfileConfig } from "../types.js";
 import type { WorkspaceRecord } from "./state-store.js";
 
-const execFileAsync = promisify(execFile);
+function execFileClosedStdin(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      command,
+      args,
+      { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          Object.assign(error, { stdout, stderr });
+          reject(error);
+          return;
+        }
+        resolve({ stdout, stderr });
+      },
+    );
+    // LXC can prompt on missing trust or authorization. Courier is unattended:
+    // EOF turns that into a visible failure instead of an indefinitely hung run.
+    child.stdin?.end();
+  });
+}
 
 interface LxdInstance {
   name: string;
@@ -204,7 +222,7 @@ export class LxdRuntimeManager {
 
   private async run(runtime: LxdVmRuntimeConfig, args: string[]): Promise<{ stdout: string; stderr: string }> {
     try {
-      return await execFileAsync(runtime.commandPath ?? "lxc", args, { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 });
+      return await execFileClosedStdin(runtime.commandPath ?? "lxc", args);
     } catch (error) {
       const detail = error as Error & { stderr?: string };
       throw new Error(`LXD command failed: ${detail.stderr?.trim() || detail.message}`);
