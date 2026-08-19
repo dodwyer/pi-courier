@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { RpcFrame } from "../rpc/pi-rpc.js";
 
 interface RunReporterOptions {
@@ -5,6 +7,8 @@ interface RunReporterOptions {
   readableProgress: boolean;
   finalUsage: boolean;
   send: (text: string) => Promise<void>;
+  statusFilePath?: string;
+  workspacePath?: string;
   now?: () => number;
 }
 
@@ -27,8 +31,11 @@ interface RunningStage {
 }
 
 type ReportKind = "periodic" | "final";
+export type StatusProjectionResult = "sent" | "unchanged" | "unavailable";
 
 const EMPTY_USAGE: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+const MAX_STATUS_BYTES = 256 * 1024;
+const MAX_STATUS_PROJECTION_CHARS = 3_000;
 
 /**
  * Turns native OMP RPC activity into small, user-facing Matrix updates.
@@ -52,6 +59,7 @@ export class RunReporter {
   private writes = 0;
   private commands = 0;
   private issues = 0;
+  private lastStatusProjection?: string;
 
   constructor(private readonly options: RunReporterOptions) {
     this.now = options.now ?? Date.now;
@@ -93,7 +101,11 @@ export class RunReporter {
       : `📊 **Run update · ${formatElapsedMinutes(elapsed)}**`;
     const lines = [title];
 
-    if (kind === "periodic") lines.push(`**Current work:** ${this.currentWork()}`);
+    if (kind === "periodic") {
+      const status = this.readStatusProjection();
+      if (status) lines.push(status, "");
+      else lines.push(`**Current work:** ${this.currentWork()}`);
+    }
     lines.push("**Model tokens — run total (since the last update)**");
     if (rows.length === 0) {
       lines.push("• No completed model response has reported token usage yet.");
@@ -115,6 +127,15 @@ export class RunReporter {
     await this.options.send(lines.join("\n"));
   }
 
+  async reportStatus(): Promise<StatusProjectionResult> {
+    const projection = this.readStatusProjection();
+    if (!projection) return "unavailable";
+    if (projection === this.lastStatusProjection) return "unchanged";
+    this.lastStatusProjection = projection;
+    await this.options.send(projection);
+    return "sent";
+  }
+
   close(): void {
     this.stopTimer();
     this.active = false;
@@ -133,6 +154,7 @@ export class RunReporter {
     this.writes = 0;
     this.commands = 0;
     this.issues = 0;
+    this.lastStatusProjection = undefined;
     if (this.options.intervalSeconds <= 0) return;
     this.timer = setInterval(() => void this.report().catch(() => {}), this.options.intervalSeconds * 1000);
     this.timer.unref();
@@ -269,6 +291,46 @@ export class RunReporter {
     else if (["write", "edit", "notebook"].includes(toolName)) this.writes += 1;
     else if (["bash", "eval", "python", "lsp"].includes(toolName)) this.commands += 1;
   }
+
+  private readStatusProjection(): string | undefined {
+    const statusFilePath = this.options.statusFilePath;
+    const workspacePath = this.options.workspacePath;
+    if (!statusFilePath || !workspacePath) return undefined;
+    try {
+      const realWorkspace = fs.realpathSync(workspacePath);
+      const realStatus = fs.realpathSync(statusFilePath);
+      if (realStatus !== realWorkspace && !realStatus.startsWith(`${realWorkspace}${path.sep}`)) return undefined;
+      const stat = fs.statSync(realStatus);
+      if (!stat.isFile() || stat.size > MAX_STATUS_BYTES) return undefined;
+      return projectStatusMarkdown(fs.readFileSync(realStatus, "utf-8"));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+export function projectStatusMarkdown(markdown: string): string | undefined {
+  const normalized = markdown.replaceAll("\0", "�").replace(/\r\n?/g, "\n");
+  const explicit = normalized.match(/^## Matrix update\s*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/im)?.[1]?.trim();
+  if (explicit) return limitProjection(`📍 **Workspace update**\n${explicit}`);
+
+  const fields = new Map<string, string>();
+  for (const line of normalized.split("\n")) {
+    const match = line.match(/^-\s+(Status|Current gate|Updated):\s*(.+)$/i);
+    if (match) fields.set(match[1].toLowerCase(), match[2].trim());
+  }
+  const lines = [
+    fields.get("status") ? `• **Status:** ${fields.get("status")}` : undefined,
+    fields.get("current gate") ? `• **Current gate:** ${fields.get("current gate")}` : undefined,
+    fields.get("updated") ? `• **Updated:** ${fields.get("updated")}` : undefined,
+  ].filter((line): line is string => line !== undefined);
+  if (lines.length === 0) return undefined;
+  return limitProjection(`📍 **Workspace status**\n${lines.join("\n")}`);
+}
+
+function limitProjection(value: string): string {
+  if (value.length <= MAX_STATUS_PROJECTION_CHARS) return value;
+  return `${value.slice(0, MAX_STATUS_PROJECTION_CHARS - 20).trimEnd()}\n…(status shortened)`;
 }
 
 function taskItems(value: unknown): Array<Record<string, unknown>> {

@@ -97,6 +97,14 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
     "readableProgress": true,
     "finalUsage": true
   },
+  "profiles": {
+    "development": {
+      "tools": ["read", "write", "edit", "bash", "task"],
+      "approvalMode": "write",
+      "statusFile": ".courier/development/status.md",
+      "matrixUpdatesFromStatus": true
+    }
+  },
   "externalWorkspaces": {
     "starbug": { "path": "/root/workspace/starbug" }
   },
@@ -116,12 +124,15 @@ courierctl list
 courierctl status nomadmade
 courierctl watch nomadmade
 courierctl watch nomadmade --raw
+courierctl resume nomadmade "Continue from the current recorded gate."
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
 ```
 
-`watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits.
+`watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `resume` restarts a stopped workspace through its existing Matrix-owned worker, so readable progress and periodic usage continue to reach the thread. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits; Matrix progress and usage reporting are unavailable during that lease.
+
+When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A `## Matrix update` section is preferred; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports.
 
 ## Isolated E2E canary
 

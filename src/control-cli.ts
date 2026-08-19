@@ -81,8 +81,14 @@ async function main(): Promise<void> {
     case "attach":
       await attach(workspace, rest.includes("--abort"));
       return;
+    case "resume": {
+      if (!workspace || rest.length === 0) throw new Error("Usage: courierctl resume <workspace> <message...>");
+      await request({ command: "resume", workspace, message: rest.join(" ") });
+      console.log(`Run resumed for ${workspace}. Progress and usage updates will be posted to its Matrix thread.`);
+      return;
+    }
     default:
-      console.log("Usage: courierctl list | status <workspace> | watch <workspace> [--raw] | attach <workspace> [--abort] | adopt <workspace>");
+      console.log("Usage: courierctl list | status <workspace> | watch <workspace> [--raw] | resume <workspace> <message...> | attach <workspace> [--abort] | adopt <workspace>");
       process.exitCode = 2;
   }
 }
@@ -110,6 +116,7 @@ async function attach(workspace: string | undefined, abort: boolean): Promise<vo
     env.OMP_AUTH_BROKER_TOKEN = fs.readFileSync(authBroker.tokenFile, "utf-8").trim();
   }
   console.log(`Opening native OMP for ${workspace}. Matrix ownership is paused until exit.`);
+  console.log("Readable Matrix progress and ten-minute usage reports are disabled while attached. Exit with Ctrl+D, then use courierctl resume for a Matrix-visible run.");
   try {
     const result = spawnSync(cliPath, args, { cwd: String(thread.workspacePath), env, stdio: "inherit" });
     if (result.error) throw result.error;

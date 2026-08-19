@@ -81,6 +81,14 @@ Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更�
     "intervalSeconds": 600,
     "readableProgress": true,
     "finalUsage": true
+  },
+  "profiles": {
+    "development": {
+      "tools": ["read", "write", "edit", "bash", "task"],
+      "approvalMode": "write",
+      "statusFile": ".courier/development/status.md",
+      "matrixUpdatesFromStatus": true
+    }
   }
 }
 ```
@@ -94,12 +102,15 @@ courierctl list
 courierctl status nomadmade
 courierctl watch nomadmade
 courierctl watch nomadmade --raw
+courierctl resume nomadmade "Continue from the current recorded gate."
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
 ```
 
-`watch` 是并发只读的精简事件视图，不是完整的 OMP 交互界面。默认情况下，它会把助手文本中的字面 `\n` 和 `\r\n` 渲染成换行，即使转义序列被拆分到多个流式 frame 中也能处理。需要查看精确原始流时使用 `--raw`。`attach` 提供完整原生 TUI，因此会独占工作区直到退出。
+`watch` 是并发只读的精简事件视图，不是完整的 OMP 交互界面。默认情况下，它会把助手文本中的字面 `\n` 和 `\r\n` 渲染成换行，即使转义序列被拆分到多个流式 frame 中也能处理。需要查看精确原始流时使用 `--raw`。`resume` 会通过原有的 Matrix 所属 worker 重启已停止的工作区，因此可读进度和定期用量仍会发送到线程。`attach` 提供完整原生 TUI，因此会独占工作区直到退出；独占期间 Matrix 进度和用量报告不可用。
+
+当 profile 启用 `matrixUpdatesFromStatus` 时，Courier 会投影工作区内的 `statusFile`，而不是转发 lead agent 的原始回合文本。优先使用 `## Matrix update` 小节；旧文件则退回显示 `Status`、`Current gate` 和 `Updated` 字段。工作区外的文件、非普通文件以及大于 256 KiB 的文件都会被忽略。相同的投影也会显示在定期的按模型用量报告中。
 
 ## 隔离的 E2E canary
 

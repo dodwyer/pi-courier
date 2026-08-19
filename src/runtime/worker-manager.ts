@@ -23,6 +23,7 @@ interface LiveWorker {
   busy: boolean;
   lastActivity: number;
   reporter: RunReporter;
+  matrixUpdatesFromStatus: boolean;
 }
 
 type InteractiveMethod = "confirm" | "select" | "input" | "editor";
@@ -162,6 +163,37 @@ export class WorkerManager {
     await worker.rpc.prompt(text);
   }
 
+  async resumeWorkspace(name: string, text: string): Promise<ThreadRecord> {
+    const prompt = text.trim();
+    if (!prompt) throw new Error("resume message is required");
+    const workspace = this.store.getWorkspace(name);
+    if (!workspace) throw new Error(`Unknown workspace ${name}`);
+    if (workspace.activeThreadKey?.startsWith("ssh:")) {
+      throw new Error(`Workspace ${name} is attached over SSH; exit the native TUI before resuming through Matrix`);
+    }
+    const threadKey = workspace.lastThreadKey;
+    const record = threadKey ? this.store.getThread(threadKey) : undefined;
+    if (!record) throw new Error(`Workspace ${name} has no resumable Matrix thread`);
+    const worker = await this.ensureWorker(record, this.profile(record.profile));
+    if (worker.busy) throw new Error(`Workspace ${name} is already running; monitor it with courierctl watch ${name}`);
+    worker.lastActivity = Date.now();
+    worker.record.lastActivity = worker.lastActivity;
+    this.store.upsertThread(worker.record);
+    this.mirror(() => this.transcripts.appendUser(worker.record, {
+      chatId: worker.record.roomId,
+      transport: "ssh-control",
+      content: prompt,
+      username: "local-operator",
+      userId: "ssh:local-operator",
+      timestamp: new Date(),
+      messageId: `ssh-${randomUUID()}`,
+      threadRootId: worker.record.rootEventId,
+      isGroupChat: false,
+    }, prompt), worker.record.workspace);
+    await worker.rpc.prompt(prompt);
+    return worker.record;
+  }
+
   async abort(msg: ExternalMessage): Promise<void> {
     const worker = this.workerForMessage(msg);
     await worker.rpc.abort();
@@ -297,6 +329,8 @@ export class WorkerManager {
       intervalSeconds: reporting?.intervalSeconds ?? 0,
       readableProgress: reporting?.readableProgress ?? false,
       finalUsage: reporting?.finalUsage ?? false,
+      statusFilePath: profile.statusFile ? resolveStatusFile(record.workspacePath, profile.statusFile) : undefined,
+      workspacePath: record.workspacePath,
       send: async (text) => {
         this.mirror(() => this.transcripts.appendAssistant(record, text), record.workspace);
         await this.sendInteractionReply(record, text).catch((err) => {
@@ -304,7 +338,14 @@ export class WorkerManager {
         });
       },
     });
-    const worker: LiveWorker = { record, rpc, reporter, busy: false, lastActivity: Date.now() };
+    const worker: LiveWorker = {
+      record,
+      rpc,
+      reporter,
+      matrixUpdatesFromStatus: profile.matrixUpdatesFromStatus === true,
+      busy: false,
+      lastActivity: Date.now(),
+    };
     rpc.onEvent((frame) => void this.handleFrame(worker, frame));
     try {
       await rpc.start();
@@ -337,6 +378,10 @@ export class WorkerManager {
         const message = frame.message as AssistantMessage | undefined;
         if (message?.content) {
           const text = extractTextFromMessage(message).trim();
+          if (worker.matrixUpdatesFromStatus) {
+            const statusResult = await worker.reporter.reportStatus();
+            if (statusResult !== "unavailable") return;
+          }
           this.mirror(() => this.transcripts.appendAssistant(worker.record, text), worker.record.workspace);
           const toolCalls = this.deps.config.hideToolCalls ? "" : formatToolCalls(message);
           const body = [text, toolCalls].filter(Boolean).join("\n\n");
@@ -577,4 +622,16 @@ function threadId(threadKey: string): string {
 function required(value: string | undefined, name: string): string {
   if (!value) throw new Error(`Missing required courier configuration: ${name}`);
   return value;
+}
+
+function resolveStatusFile(workspacePath: string, configuredPath: string): string {
+  if (!configuredPath.trim() || path.isAbsolute(configuredPath)) {
+    throw new Error("profile statusFile must be a non-empty workspace-relative path");
+  }
+  const resolved = path.resolve(workspacePath, configuredPath);
+  const root = path.resolve(workspacePath);
+  if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error("profile statusFile must remain inside the workspace");
+  }
+  return resolved;
 }

@@ -8,6 +8,7 @@ interface ControlRequest {
   command?: string;
   workspace?: string;
   abort?: boolean;
+  message?: string;
 }
 
 export class ControlServer {
@@ -104,6 +105,11 @@ export class ControlServer {
           const workspace = requiredWorkspace(request);
           this.workers.releaseWorkspace(workspace);
           return this.respond(socket, { ok: true });
+        }
+        case "resume": {
+          const workspace = requiredWorkspace(request);
+          const thread = await this.workers.resumeWorkspace(workspace, request.message ?? "");
+          return this.respond(socket, { ok: true, thread });
         }
         case "watch": {
           const workspace = requiredWorkspace(request);

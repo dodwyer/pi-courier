@@ -44,4 +44,36 @@ describe("ControlServer", () => {
     await clientClosed;
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
+
+  it("resumes a stopped workspace through its Matrix-owned worker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-control-resume-test-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "control.sock");
+    const resumeWorkspace = vi.fn().mockResolvedValue({ workspace: "research", status: "idle" });
+    const workers = { resumeWorkspace } as unknown as WorkerManager;
+    const server = new ControlServer({ controlSocket: socketPath } as MsgBridgeConfig, workers);
+    await server.start();
+
+    const response = await socketRequest(socketPath, {
+      command: "resume",
+      workspace: "research",
+      message: "Continue from the accepted task plan.",
+    });
+
+    expect(response.ok).toBe(true);
+    expect(resumeWorkspace).toHaveBeenCalledWith("research", "Continue from the accepted task plan.");
+    await server.stop();
+  });
 });
+
+async function socketRequest(socketPath: string, request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const client = net.createConnection(socketPath);
+    let buffer = "";
+    client.setEncoding("utf-8");
+    client.once("error", reject);
+    client.once("connect", () => client.write(`${JSON.stringify(request)}\n`));
+    client.on("data", (chunk) => { buffer += chunk; });
+    client.once("end", () => resolve(JSON.parse(buffer.trim()) as Record<string, unknown>));
+  });
+}

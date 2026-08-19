@@ -36,6 +36,10 @@ export interface OmpProfileConfig {
   approvalMode: ApprovalMode;
   model?: string;
   configFiles?: string[];
+  /** Workspace-relative Markdown file used as the human-readable Matrix projection for this profile. */
+  statusFile?: string;
+  /** Prefer the status-file projection over forwarding raw lead-agent turn text to Matrix. */
+  matrixUpdatesFromStatus?: boolean;
 }
 
 export interface ExternalWorkspaceConfig {

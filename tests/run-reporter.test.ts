@@ -1,8 +1,16 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunReporter } from "../src/runtime/run-reporter";
+import { projectStatusMarkdown, RunReporter } from "../src/runtime/run-reporter";
 
 describe("RunReporter", () => {
-  afterEach(() => vi.useRealTimers());
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    vi.useRealTimers();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
 
   it("reports live and settled usage per resolved model without exposing task prompts", async () => {
     let now = 0;
@@ -103,5 +111,53 @@ describe("RunReporter", () => {
     expect(messages[0]).toContain("Run update · 10 minutes");
     expect(messages[0]).toContain("Claude Opus 5 (anthropic): 35 (+35)");
     reporter.close();
+  });
+
+  it("projects and deduplicates the explicit Matrix section from a bounded workspace status file", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "courier-status-test-"));
+    dirs.push(workspace);
+    const statusDir = join(workspace, ".courier", "development");
+    mkdirSync(statusDir, { recursive: true });
+    const statusFilePath = join(statusDir, "status.md");
+    writeFileSync(statusFilePath, `# Development status
+
+- Status: implementation
+- Current gate: task 2
+
+## Matrix update
+
+- Architecture and task plan are accepted.
+- Building the HTTP surface now.
+- Next: Opus implementation review.
+
+## Internal ledger
+
+- raw protocol detail that must not reach Matrix
+`);
+    const messages: string[] = [];
+    const reporter = new RunReporter({
+      intervalSeconds: 0,
+      readableProgress: true,
+      finalUsage: true,
+      statusFilePath,
+      workspacePath: workspace,
+      send: async (text) => { messages.push(text); },
+    });
+
+    expect(await reporter.reportStatus()).toBe("sent");
+    expect(await reporter.reportStatus()).toBe("unchanged");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("Building the HTTP surface now");
+    expect(messages[0]).not.toContain("raw protocol detail");
+
+    await reporter.handle({ type: "agent_start" });
+    await reporter.report();
+    expect(messages[1]).toContain("Workspace update");
+    expect(messages[1]).toContain("Model tokens");
+  });
+
+  it("falls back to concise status metadata for legacy status files", () => {
+    expect(projectStatusMarkdown(`# Status\n\n- Status: task manifest accepted\n- Current gate: host preflight\n- Updated: now\n- Internal: noisy\n`))
+      .toBe("📍 **Workspace status**\n• **Status:** task manifest accepted\n• **Current gate:** host preflight\n• **Updated:** now");
   });
 });
