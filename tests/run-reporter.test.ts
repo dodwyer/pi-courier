@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -114,6 +114,55 @@ describe("RunReporter", () => {
     reporter.close();
   });
 
+  it("emits bounded delegated-stage heartbeats and persists task result envelopes mechanically", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-18T10:00:00Z"));
+    const workspace = mkdtempSync(join(tmpdir(), "courier-task-result-test-"));
+    dirs.push(workspace);
+    const taskResultDirectoryPath = join(workspace, ".courier", "development", "task-results");
+    const messages: string[] = [];
+    const reporter = new RunReporter({
+      intervalSeconds: 0,
+      progressHeartbeatSeconds: 60,
+      readableProgress: false,
+      finalUsage: false,
+      taskResultDirectoryPath,
+      send: async (text) => { messages.push(text); },
+    });
+    await reporter.handle({ type: "agent_start" });
+    await reporter.handle({
+      type: "tool_execution_start",
+      toolCallId: "task-long",
+      toolName: "task",
+      args: { agent: "implementation-agent", task: "hidden prompt" },
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(messages).toEqual([expect.stringContaining("Still working · 1m 0s")]);
+    expect(messages[0]).not.toContain("hidden prompt");
+
+    await reporter.handle({
+      type: "tool_execution_end",
+      toolCallId: "task-long",
+      toolName: "task",
+      result: { details: { results: [{
+        id: "implement",
+        agent: "implementation-agent",
+        exitCode: 0,
+        resolvedModel: "openai-codex/gpt-5.6-sol:xhigh",
+        structuredOutput: { data: { verdict: "pass" } },
+      }] } },
+    });
+    const files = readdirSync(taskResultDirectoryPath);
+    expect(files).toHaveLength(1);
+    expect(JSON.parse(readFileSync(join(taskResultDirectoryPath, files[0]), "utf-8"))).toMatchObject({
+      schemaVersion: 1,
+      toolCallId: "task-long",
+      results: [{ resolvedModel: "openai-codex/gpt-5.6-sol:xhigh" }],
+    });
+    reporter.close();
+  });
+
   it("projects and deduplicates the explicit Matrix section from a bounded workspace status file", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "courier-status-test-"));
     dirs.push(workspace);
@@ -155,6 +204,9 @@ describe("RunReporter", () => {
     await reporter.report();
     expect(messages[1]).toContain("Workspace update");
     expect(messages[1]).toContain("Model tokens");
+    await reporter.report();
+    expect(messages[2]).toContain("workspace status is unchanged");
+    expect(messages[2]).not.toContain("Building the HTTP surface now");
   });
 
   it("falls back to concise status metadata for legacy status files", () => {

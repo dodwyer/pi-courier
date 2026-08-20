@@ -25,8 +25,34 @@ describe("E2E artifact validators", () => {
     write(root, ".courier/transcript.md", "transcript\n");
     write(root, ".courier/development/plan.md", "plan\n");
     write(root, ".courier/development/tasks.md", "tasks\n");
-    write(root, ".courier/development/state.json", JSON.stringify({
+    const contractSha256 = "a".repeat(64);
+    write(root, ".courier/development/run-contract.json", JSON.stringify({
+      schemaVersion: 2,
+      contractSha256,
+      modelMap: {
+        lead: "openai-codex/gpt-5.6-sol:max",
+        "architecture-planner": "anthropic/claude-fable-5:max",
+        "task-plan-reviewer": "anthropic/claude-opus-5:max",
+        "implementation-agent": "openai-codex/gpt-5.6-sol:xhigh",
+        "implementation-reviewer": "anthropic/claude-opus-5:max",
+        "acceptance-reviewer": "anthropic/claude-fable-5:max",
+      },
+    }));
+    write(root, ".courier/development/task-results/0001-models.json", JSON.stringify({
       schemaVersion: 1,
+      results: [
+        { agent: "architecture-planner", resolvedModel: "anthropic/claude-fable-5:max" },
+        { agent: "plan-reviewer", resolvedModel: "openai-codex/gpt-5.6-sol:max" },
+        { agent: "task-plan-reviewer", resolvedModel: "anthropic/claude-opus-5:max" },
+        { agent: "implementation-agent", resolvedModel: "openai-codex/gpt-5.6-sol:xhigh" },
+        { agent: "implementation-reviewer", resolvedModel: "anthropic/claude-opus-5:max" },
+        { agent: "reviewer", resolvedModel: "openai-codex/gpt-5.6-sol:max" },
+        { agent: "acceptance-reviewer", resolvedModel: "anthropic/claude-fable-5:max" },
+      ],
+    }));
+    write(root, ".courier/development/state.json", JSON.stringify({
+      schemaVersion: 2,
+      contractSha256,
       workflow: "standard",
       status: "completed",
       baseCommit,

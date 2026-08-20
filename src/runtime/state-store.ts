@@ -15,6 +15,10 @@ export interface ThreadRecord {
   sessionFile?: string;
   status: string;
   lastActivity: number;
+  /** Absent for runs created before workflow contracts were introduced. */
+  workflowContractHash?: string;
+  /** Deterministic, secret-free JSON snapshot matching workflowContractHash. */
+  workflowContractJson?: string;
 }
 
 export interface WorkspaceRecord {
@@ -58,6 +62,8 @@ export class StateStore {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS threads_room_root ON threads(room_id, root_event_id);
     `);
+    this.ensureColumn("threads", "workflow_contract_hash", "TEXT");
+    this.ensureColumn("threads", "workflow_contract_json", "TEXT");
     // A process restart terminates every child, so no persisted lease remains active.
     this.db.exec(`
       UPDATE workspaces SET active_thread_key = NULL;
@@ -132,8 +138,8 @@ export class StateStore {
 
   upsertThread(record: ThreadRecord): void {
     this.db.prepare(`
-      INSERT INTO threads(thread_key, room_id, root_event_id, transport, username, workspace, workspace_path, profile, session_dir, session_file, status, last_activity)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO threads(thread_key, room_id, root_event_id, transport, username, workspace, workspace_path, profile, session_dir, session_file, status, last_activity, workflow_contract_hash, workflow_contract_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(thread_key) DO UPDATE SET
         transport=excluded.transport,
         username=excluded.username,
@@ -143,7 +149,9 @@ export class StateStore {
         session_dir=excluded.session_dir,
         session_file=COALESCE(excluded.session_file, threads.session_file),
         status=excluded.status,
-        last_activity=excluded.last_activity
+        last_activity=excluded.last_activity,
+        workflow_contract_hash=excluded.workflow_contract_hash,
+        workflow_contract_json=excluded.workflow_contract_json
     `).run(
       record.threadKey,
       record.roomId,
@@ -157,6 +165,8 @@ export class StateStore {
       record.sessionFile ?? null,
       record.status,
       record.lastActivity,
+      record.workflowContractHash ?? null,
+      record.workflowContractJson ?? null,
     );
   }
 
@@ -193,6 +203,18 @@ export class StateStore {
     this.db.prepare("UPDATE threads SET status = ?, session_file = COALESCE(?, session_file), last_activity = ? WHERE thread_key = ?")
       .run(status, sessionFile ?? null, Date.now(), threadKey);
   }
+
+  clearThreadSession(threadKey: string): void {
+    this.db.prepare("UPDATE threads SET session_file = NULL, last_activity = ? WHERE thread_key = ?")
+      .run(Date.now(), threadKey);
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((candidate) => candidate.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  }
 }
 
 function workspaceFromRow(row: Record<string, unknown>): WorkspaceRecord {
@@ -220,5 +242,7 @@ function threadFromRow(row: Record<string, unknown>): ThreadRecord {
     sessionFile: row.session_file ? String(row.session_file) : undefined,
     status: String(row.status),
     lastActivity: Number(row.last_activity),
+    workflowContractHash: row.workflow_contract_hash ? String(row.workflow_contract_hash) : undefined,
+    workflowContractJson: row.workflow_contract_json ? String(row.workflow_contract_json) : undefined,
   };
 }

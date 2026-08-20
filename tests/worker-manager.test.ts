@@ -142,6 +142,91 @@ rl.on("line", line => {
     expect(readdirSync(join(dir, "state", "sessions"))).toEqual([]);
     await manager.shutdown();
   });
+
+  it("blocks a changed workflow contract until an explicit migration starts a clean lead session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-worker-contract-test-"));
+    dirs.push(dir);
+    const fakeOmp = join(dir, "omp");
+    writeFileSync(fakeOmp, `#!/usr/bin/env node
+const readline = require("node:readline");
+process.stdout.write(JSON.stringify({type:"ready"}) + "\\n");
+const rl = readline.createInterface({input: process.stdin});
+rl.on("line", line => {
+  const frame = JSON.parse(line);
+  if (frame.type === "get_state") {
+    process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{sessionId:process.pid.toString(),sessionFile:process.cwd()+"/session-"+process.pid+".jsonl"}})+"\\n");
+  } else if (frame.type === "prompt") {
+    process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{agentInvoked:true}})+"\\n");
+    process.stdout.write(JSON.stringify({type:"agent_start"})+"\\n");
+    process.stdout.write(JSON.stringify({type:"agent_end"})+"\\n");
+  } else if (frame.type === "new_session") {
+    process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{cancelled:false}})+"\\n");
+  }
+});
+`, { mode: 0o755 });
+    chmodSync(fakeOmp, 0o755);
+    const promptFile = join(dir, "AGENTS.md");
+    const configFile = join(dir, "development.yml");
+    writeFileSync(promptFile, "workflow one\n");
+    writeFileSync(configFile, "modelRoles: {}\n");
+    const config: MsgBridgeConfig = {
+      workspaceRoot: join(dir, "threads"),
+      stateDir: join(dir, "state"),
+      controlSocket: join(dir, "control.sock"),
+      ompCliPath: fakeOmp,
+      externalWorkspaces: {},
+      profiles: {
+        development: {
+          tools: ["read", "task"],
+          approvalMode: "write",
+          configFiles: [configFile],
+          workflowContract: {
+            version: "development-v2",
+            stateDirectory: ".courier/development",
+            promptFiles: [promptFile],
+            expectedModels: { lead: "test/fake:max" },
+            toolchainIdentity: "test-image-1",
+            rotationRequestFile: ".courier/development/rotate.json",
+          },
+        },
+      },
+    };
+    const replies: string[] = [];
+    const manager = new WorkerManager({
+      config,
+      sendReply: async (_record, text) => { replies.push(text); },
+      sendTyping: async () => {},
+    });
+    const record = await manager.start(message("$contract-root", "contract-room"), "development", "contract-workspace");
+    expect(record.workflowContractHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(existsSync(join(record.workspacePath, ".courier", "development", "run-contract.json"))).toBe(true);
+
+    const ledger = join(record.workspacePath, ".courier", "development", "state.json");
+    writeFileSync(ledger, "{}\n");
+    writeFileSync(join(record.workspacePath, ".courier", "development", "rotate.json"), JSON.stringify({
+      schemaVersion: 1,
+      contractSha256: record.workflowContractHash,
+      acceptedTask: "TASK-1",
+      baseCommit: "a".repeat(40),
+      headCommit: "b".repeat(40),
+      summary: "Task one passed its independent review.",
+      nextTask: "TASK-2",
+      ledgerPaths: [".courier/development/state.json"],
+    }));
+    await manager.prompt({ ...message("$rotation-prompt", "contract-room"), threadRootId: "$contract-root" }, "finish task one");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(replies).toContainEqual(expect.stringContaining("Lead context rotated"));
+    expect(existsSync(join(record.workspacePath, ".courier", "development", "rotate.json"))).toBe(false);
+    expect(readdirSync(join(record.workspacePath, ".courier", "development", "rotations"))).toHaveLength(1);
+
+    writeFileSync(promptFile, "workflow two\n");
+    await expect(manager.resumeWorkspace(record.workspace, "continue product work")).rejects.toThrow(/run !migrate/);
+
+    const migrated = await manager.migrateWorkspace(record.workspace);
+    expect(migrated.workflowContractHash).not.toBe(record.workflowContractHash);
+    expect(migrated.sessionDir).toContain("-migration-");
+    await manager.shutdown();
+  });
 });
 
 function message(messageId: string, chatId: string): ExternalMessage {

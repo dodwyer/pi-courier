@@ -9,6 +9,13 @@ import { LxdRuntimeManager, type RuntimeEnvironmentStatus, type RuntimeShellComm
 import { RunReporter } from "./run-reporter.js";
 import { StateStore, type ThreadRecord } from "./state-store.js";
 import { TranscriptWriter } from "./transcript-writer.js";
+import {
+  type ArtifactViolation,
+  auditArtifactRoot,
+  type CapturedWorkflowContract,
+  captureWorkflowContract,
+  resolveWithinWorkspace,
+} from "./workflow-contract.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 
 export interface CourierActivity {
@@ -50,6 +57,20 @@ const BRIEF_HANDOFF_PROMPT = [
   "Keep BRIEF.md as the source of scope.",
 ].join(" ");
 
+const WORKFLOW_MIGRATION_PROMPT = [
+  "This is an explicit workflow-contract migration, not a product-work turn.",
+  "Read .courier/development/run-contract.json and the existing ledger, reconcile them with Git, record the migration and a compact continuation packet, then stop at the migration gate.",
+  "Do not implement, review, validate, commit, or otherwise advance product work until a later user turn.",
+].join(" ");
+
+function rotationPrompt(packetPath: string): string {
+  return [
+    `A previous lead completed an accepted task and Courier rotated the session. Read the compact packet at ${packetPath},`,
+    "then reconcile its contract hash, ledger paths, commits, and next task with Git and .courier/development/state.json.",
+    "Continue only from the recorded next gate. Do not repeat accepted architecture, task, validation, or review work.",
+  ].join(" ");
+}
+
 export class WorkerManager {
   readonly store: StateStore;
   readonly workspaces: WorkspaceManager;
@@ -85,6 +106,7 @@ export class WorkerManager {
     if (this.store.getThread(threadKey)) throw new Error("This Matrix thread is already initialized");
     const workspace = this.workspaces.resolve(workspaceName, true);
     this.validateProfileWorkspace(profileName, profile, workspace);
+    const contract = captureWorkflowContract(this.deps.config, profileName, profile);
     const sessionDir = path.join(required(this.deps.config.stateDir, "stateDir"), "sessions", threadId(threadKey));
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
     const record: ThreadRecord = {
@@ -99,8 +121,11 @@ export class WorkerManager {
       sessionDir,
       status: "starting",
       lastActivity: Date.now(),
+      workflowContractHash: contract?.hash,
+      workflowContractJson: contract?.json,
     };
     this.store.upsertThread(record);
+    if (contract) this.persistWorkflowContract(record, profile, contract);
     await this.ensureWorker(record, profile);
     return this.store.getThread(threadKey)!;
   }
@@ -141,6 +166,8 @@ export class WorkerManager {
     const rootEventId = msg.threadRootId ?? msg.messageId;
     const threadKey = makeThreadKey(msg.chatId, rootEventId);
     if (this.store.getThread(threadKey)) throw new Error("This Matrix thread is already initialized");
+    const profile = this.profile(previous.profile);
+    this.assertWorkflowContract(previous, profile);
     const record: ThreadRecord = {
       ...previous,
       threadKey,
@@ -151,9 +178,9 @@ export class WorkerManager {
       status: "starting",
       lastActivity: Date.now(),
     };
-    this.validateProfileWorkspace(record.profile, this.profile(record.profile), workspace);
+    this.validateProfileWorkspace(record.profile, profile, workspace);
     this.store.upsertThread(record);
-    await this.ensureWorker(record, this.profile(record.profile));
+    await this.ensureWorker(record, profile);
     return this.store.getThread(threadKey)!;
   }
 
@@ -179,7 +206,9 @@ export class WorkerManager {
     }
     const record = this.store.getLastThreadForWorkspace(name);
     if (!record) throw new Error(`Workspace ${name} has no resumable Matrix thread`);
-    const worker = await this.ensureWorker(record, this.profile(record.profile));
+    const profile = this.profile(record.profile);
+    this.assertWorkflowContract(record, profile);
+    const worker = await this.ensureWorker(record, profile);
     if (worker.busy) throw new Error(`Workspace ${name} is already running; monitor it with courierctl watch ${name}`);
     worker.lastActivity = Date.now();
     worker.record.lastActivity = worker.lastActivity;
@@ -207,7 +236,10 @@ export class WorkerManager {
   async newSession(msg: ExternalMessage, profileName?: string): Promise<ThreadRecord> {
     const worker = this.workerForMessage(msg);
     if (!profileName || profileName === worker.record.profile) {
+      this.assertWorkflowContract(worker.record, this.profile(worker.record.profile));
       await worker.rpc.newSession();
+      worker.record.sessionFile = undefined;
+      this.store.clearThreadSession(worker.record.threadKey);
       await this.refreshState(worker);
       return worker.record;
     }
@@ -219,10 +251,29 @@ export class WorkerManager {
     worker.record.profile = profileName;
     worker.record.sessionDir = path.join(required(this.deps.config.stateDir, "stateDir"), "sessions", `${threadId(worker.record.threadKey)}-${Date.now()}`);
     worker.record.sessionFile = undefined;
+    this.store.clearThreadSession(worker.record.threadKey);
     worker.record.status = "starting";
+    const contract = captureWorkflowContract(this.deps.config, profileName, profile);
+    worker.record.workflowContractHash = contract?.hash;
+    worker.record.workflowContractJson = contract?.json;
     this.store.upsertThread(worker.record);
+    if (contract) this.persistWorkflowContract(worker.record, profile, contract);
     await this.ensureWorker(worker.record, profile);
     return worker.record;
+  }
+
+  async migrate(msg: ExternalMessage): Promise<ThreadRecord> {
+    if (!msg.threadRootId) throw new Error("Migration must be requested inside an initialized Matrix thread");
+    const record = this.store.getThreadByRoomRoot(msg.chatId, msg.threadRootId);
+    if (!record) throw new Error("This Matrix thread is not initialized");
+    return this.migrateRecord(record);
+  }
+
+  async migrateWorkspace(name: string): Promise<ThreadRecord> {
+    const workspace = this.store.getWorkspace(name);
+    const record = workspace?.lastThreadKey ? this.store.getThread(workspace.lastThreadKey) : undefined;
+    if (!record) throw new Error(`Workspace ${name} has no resumable Matrix thread`);
+    return this.migrateRecord(record);
   }
 
   async stop(msg: ExternalMessage): Promise<void> {
@@ -344,6 +395,15 @@ export class WorkerManager {
     return this.runtimes.tunnelCommand(target.profile, target.workspace, guestPort, localPort);
   }
 
+  auditArtifacts(name: string): ArtifactViolation[] {
+    const workspace = this.workspaces.resolve(name, false);
+    const record = this.store.getLastThreadForWorkspace(name);
+    if (!record) throw new Error(`Workspace ${name} has no workflow record`);
+    const policy = this.profile(record.profile).artifactPolicy;
+    if (!policy) throw new Error(`Profile ${record.profile} has no artifact policy`);
+    return auditArtifactRoot(workspace.path, policy);
+  }
+
   async runtimeStatus(record: ThreadRecord): Promise<RuntimeEnvironmentStatus | undefined> {
     const workspace = this.store.getWorkspace(record.workspace);
     return workspace ? this.runtimes.status(this.profile(record.profile), workspace) : undefined;
@@ -363,6 +423,7 @@ export class WorkerManager {
   }
 
   private async ensureWorker(record: ThreadRecord, profile: OmpProfileConfig): Promise<LiveWorker> {
+    this.assertWorkflowContract(record, profile);
     const existing = this.workers.get(record.threadKey);
     if (existing) return existing;
     const maxWorkers = this.deps.config.maxWorkers ?? 4;
@@ -403,8 +464,12 @@ export class WorkerManager {
       intervalSeconds: reporting?.intervalSeconds ?? 0,
       readableProgress: reporting?.readableProgress ?? false,
       finalUsage: reporting?.finalUsage ?? false,
+      progressHeartbeatSeconds: reporting?.progressHeartbeatSeconds ?? 0,
       statusFilePath: profile.statusFile ? resolveStatusFile(record.workspacePath, profile.statusFile) : undefined,
       workspacePath: record.workspacePath,
+      taskResultDirectoryPath: record.workflowContractHash && profile.workflowContract
+        ? resolveWithinWorkspace(record.workspacePath, path.join(profile.workflowContract.stateDirectory, "task-results"))
+        : undefined,
       send: async (text) => {
         this.mirror(() => this.transcripts.appendAssistant(record, text), record.workspace);
         await this.sendInteractionReply(record, text).catch((err) => {
@@ -474,6 +539,7 @@ export class WorkerManager {
         worker.busy = false;
         worker.record.status = "idle";
         await this.refreshState(worker);
+        await this.rotateLeadIfRequested(worker);
         return;
       case "extension_ui_request":
         await this.handleUiRequest(worker, frame);
@@ -583,6 +649,124 @@ export class WorkerManager {
   private async stopRuntime(record: ThreadRecord): Promise<void> {
     const workspace = this.store.getWorkspace(record.workspace);
     if (workspace) await this.runtimes.stop(this.profile(record.profile), workspace);
+  }
+
+  private assertWorkflowContract(record: ThreadRecord, profile: OmpProfileConfig): void {
+    // Legacy runs remain resumable and observable. Only runs born with a
+    // contract are fail-closed, so rollout never mutates an active old run.
+    if (!record.workflowContractHash) return;
+    const current = captureWorkflowContract(this.deps.config, record.profile, profile);
+    if (!current || current.hash !== record.workflowContractHash) {
+      throw new Error(
+        `Workflow contract changed for ${record.workspace}; run !migrate in its Matrix thread or courierctl migrate ${record.workspace} before product work`,
+      );
+    }
+  }
+
+  private async migrateRecord(record: ThreadRecord): Promise<ThreadRecord> {
+    const live = this.workers.get(record.threadKey);
+    if (live?.busy) throw new Error(`Workspace ${record.workspace} is busy; abort or wait before migrating its workflow`);
+    const profile = this.profile(record.profile);
+    const contract = captureWorkflowContract(this.deps.config, record.profile, profile);
+    if (!contract) throw new Error(`Profile ${record.profile} does not define a workflow contract`);
+    if (record.workflowContractHash === contract.hash) throw new Error("Workflow contract is already current");
+    const previousHash = record.workflowContractHash;
+    await this.stopWorker(record.threadKey, "migrating", true);
+    record.sessionDir = path.join(
+      required(this.deps.config.stateDir, "stateDir"),
+      "sessions",
+      `${threadId(record.threadKey)}-migration-${Date.now()}`,
+    );
+    record.sessionFile = undefined;
+    this.store.clearThreadSession(record.threadKey);
+    record.status = "starting";
+    record.workflowContractHash = contract.hash;
+    record.workflowContractJson = contract.json;
+    this.store.upsertThread(record);
+    this.persistWorkflowContract(record, profile, contract, previousHash);
+    await this.ensureWorker(record, profile);
+    await this.resumeWorkspace(record.workspace, WORKFLOW_MIGRATION_PROMPT);
+    return this.store.getThread(record.threadKey)!;
+  }
+
+  private persistWorkflowContract(
+    record: ThreadRecord,
+    profile: OmpProfileConfig,
+    contract: CapturedWorkflowContract,
+    previousHash?: string,
+  ): void {
+    const stateDirectory = profile.workflowContract?.stateDirectory;
+    if (!stateDirectory) return;
+    const directory = resolveWithinWorkspace(record.workspacePath, stateDirectory);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const payload = `${JSON.stringify({
+      ...contract.value,
+      contractSha256: contract.hash,
+      ...(previousHash ? { migratedFromSha256: previousHash } : {}),
+    }, null, 2)}\n`;
+    const target = path.join(directory, "run-contract.json");
+    const temporary = path.join(directory, `.run-contract-${process.pid}-${randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, payload, { mode: 0o600 });
+    fs.renameSync(temporary, target);
+  }
+
+  private async rotateLeadIfRequested(worker: LiveWorker): Promise<void> {
+    const workflow = this.profile(worker.record.profile).workflowContract;
+    if (!worker.record.workflowContractHash || !workflow?.rotationRequestFile) return;
+    const requestPath = resolveWithinWorkspace(worker.record.workspacePath, workflow.rotationRequestFile);
+    if (!fs.existsSync(requestPath)) return;
+    const stat = fs.lstatSync(requestPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) {
+      await this.sendInteractionReply(worker.record, "⚠️ Lead rotation request was rejected because it is not a small regular file.");
+      return;
+    }
+    let packet: Record<string, unknown>;
+    try {
+      packet = JSON.parse(fs.readFileSync(requestPath, "utf-8")) as Record<string, unknown>;
+    } catch {
+      await this.sendInteractionReply(worker.record, "⚠️ Lead rotation request was rejected because it is not valid JSON.");
+      return;
+    }
+    const ledgerPaths = Array.isArray(packet.ledgerPaths)
+      ? packet.ledgerPaths.filter((value): value is string => typeof value === "string")
+      : [];
+    if (
+      packet.schemaVersion !== 1
+      || packet.contractSha256 !== worker.record.workflowContractHash
+      || typeof packet.acceptedTask !== "string"
+      || typeof packet.baseCommit !== "string"
+      || typeof packet.headCommit !== "string"
+      || typeof packet.summary !== "string"
+      || packet.summary.length > 8_000
+      || !(typeof packet.nextTask === "string" || packet.nextTask === null)
+      || ledgerPaths.length === 0
+      || ledgerPaths.length > 12
+    ) {
+      await this.sendInteractionReply(worker.record, "⚠️ Lead rotation request was rejected because its continuation packet is incomplete or does not match this run contract.");
+      return;
+    }
+    for (const ledgerPath of ledgerPaths) resolveWithinWorkspace(worker.record.workspacePath, ledgerPath);
+    const stateDirectory = resolveWithinWorkspace(worker.record.workspacePath, workflow.stateDirectory);
+    const archiveDirectory = path.join(stateDirectory, "rotations");
+    fs.mkdirSync(archiveDirectory, { recursive: true, mode: 0o700 });
+    const archiveName = `${Date.now()}-${safePathSegment(String(packet.acceptedTask))}.json`;
+    const archivePath = path.join(archiveDirectory, archiveName);
+    fs.renameSync(requestPath, archivePath);
+    try {
+      await worker.rpc.newSession();
+      worker.record.sessionFile = undefined;
+      this.store.clearThreadSession(worker.record.threadKey);
+      await this.refreshState(worker);
+      const relativePacket = path.relative(worker.record.workspacePath, archivePath);
+      await this.sendInteractionReply(
+        worker.record,
+        `🔄 **Lead context rotated** after accepted task ${packet.acceptedTask}. Continuing from the compact ledger packet.`,
+      );
+      await worker.rpc.prompt(rotationPrompt(relativePacket));
+    } catch (error) {
+      if (!fs.existsSync(requestPath) && fs.existsSync(archivePath)) fs.renameSync(archivePath, requestPath);
+      throw error;
+    }
   }
 
   private environmentTarget(name: string): { workspace: import("./state-store.js").WorkspaceRecord; profile: OmpProfileConfig } {
@@ -738,6 +922,10 @@ export function makeThreadKey(roomId: string, rootEventId: string): string {
 
 function threadId(threadKey: string): string {
   return createHash("sha256").update(threadKey).digest("hex").slice(0, 24);
+}
+
+function safePathSegment(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "task";
 }
 
 function required(value: string | undefined, name: string): string {

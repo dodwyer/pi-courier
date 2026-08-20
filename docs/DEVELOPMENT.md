@@ -20,7 +20,16 @@ requires an observed busy/starting state followed by idle; artifact validators
 then check the development ledger or research decision pack before emitting a
 secret-free report.
 
+New contracted workflows persist a deterministic contract snapshot with each
+thread. Resume fails closed when the effective profile, prompt files, role model
+map, runtime image, or toolchain identity changes; an explicit migration starts
+a new lead context at a reconciliation-only gate. Task envelopes and accepted
+boundary rotation packets are persisted mechanically by Courier. Legacy thread
+rows have no contract hash and intentionally retain their old resume behavior.
+
 实时 E2E 路径由 `courier-e2e` 实现。它使用独立 Matrix driver 连接，只发送经过验证的 suite 文件中定义的 case，并把返回的 Matrix event ID 与隔离 Courier 的控制记录关联。完成条件是先观察到 busy/starting，再回到 idle；随后验证开发 ledger 或研究 decision pack，并生成不含秘密值的报告。
+
+新的 contract workflow 会为每个线程保存确定性的 contract 快照。当有效 profile、prompt 文件、角色模型映射、runtime 镜像或工具链身份发生变化时，恢复会默认失败；显式迁移会在仅用于对账的关卡中启动新的 lead 上下文。Task envelope 和已接受边界的 rotation packet 由 Courier 机械持久化。旧线程没有 contract hash，因此有意保留原来的恢复行为。
 
 ## Invariants / 不变量
 
@@ -29,6 +38,7 @@ secret-free report.
 - Exact session paths are persisted; `--continue` is never used globally. / 持久化精确 session 路径，不使用全局 `--continue`。
 - Matrix interaction IDs are single-use, scoped to their originating thread, and fail closed. / Matrix 交互 ID 只能使用一次、只在来源线程有效，并在超时时默认拒绝或取消。
 - Periodic usage is grouped by the resolved provider/model. Active task totals are explicitly approximate until OMP publishes settled cache usage. / 定期 usage 按实际 provider/model 分组；在 OMP 发布最终缓存 usage 前，运行中 task 的总数会明确标为估算值。
+- A contracted run cannot resume under a different effective workflow without explicit migration. / 已记录 contract 的运行不能在未显式迁移时使用不同的有效 workflow 恢复。
 - Unmanaged existing directories are never adopted implicitly. / 不会隐式接管已有未管理目录。
 - Canary automation never shares a trusted Matrix identity, writable state, or workspace root with production Courier. / Canary 自动化不与生产 Courier 共用受信任 Matrix 身份、可写状态或工作区根目录。
 

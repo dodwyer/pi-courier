@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RpcFrame } from "../rpc/pi-rpc.js";
@@ -6,9 +7,11 @@ interface RunReporterOptions {
   intervalSeconds: number;
   readableProgress: boolean;
   finalUsage: boolean;
+  progressHeartbeatSeconds?: number;
   send: (text: string) => Promise<void>;
   statusFilePath?: string;
   workspacePath?: string;
+  taskResultDirectoryPath?: string;
   now?: () => number;
 }
 
@@ -28,6 +31,7 @@ interface ActiveTaskUsage {
 interface RunningStage {
   labels: string[];
   startedAt: number;
+  lastHeartbeatAt: number;
 }
 
 type ReportKind = "periodic" | "final";
@@ -36,6 +40,7 @@ export type StatusProjectionResult = "sent" | "unchanged" | "unavailable";
 const EMPTY_USAGE: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 const MAX_STATUS_BYTES = 256 * 1024;
 const MAX_STATUS_PROJECTION_CHARS = 3_000;
+const MAX_TASK_RESULT_BYTES = 1024 * 1024;
 
 /**
  * Turns native OMP RPC activity into small, user-facing Matrix updates.
@@ -50,6 +55,7 @@ export class RunReporter {
   private active = false;
   private startedAt = 0;
   private timer?: NodeJS.Timeout;
+  private progressTimer?: NodeJS.Timeout;
   private readonly exactUsage = new Map<string, UsageTotals>();
   private readonly activeTaskUsage = new Map<string, ActiveTaskUsage>();
   private readonly settledTaskIds = new Set<string>();
@@ -60,6 +66,7 @@ export class RunReporter {
   private commands = 0;
   private issues = 0;
   private lastStatusProjection?: string;
+  private taskResultSequence = 0;
 
   constructor(private readonly options: RunReporterOptions) {
     this.now = options.now ?? Date.now;
@@ -103,7 +110,12 @@ export class RunReporter {
 
     if (kind === "periodic") {
       const status = this.readStatusProjection();
-      if (status) lines.push(status, "");
+      if (status && status !== this.lastStatusProjection) {
+        this.lastStatusProjection = status;
+        lines.push(status, "");
+      } else if (status) {
+        lines.push(`**Current work:** ${this.currentWork()} · workspace status is unchanged.`);
+      }
       else lines.push(`**Current work:** ${this.currentWork()}`);
     }
     lines.push("**Model tokens processed — run total (since the last update)**");
@@ -162,9 +174,19 @@ export class RunReporter {
     this.commands = 0;
     this.issues = 0;
     this.lastStatusProjection = undefined;
-    if (this.options.intervalSeconds <= 0) return;
-    this.timer = setInterval(() => void this.report().catch(() => {}), this.options.intervalSeconds * 1000);
-    this.timer.unref();
+    this.taskResultSequence = 0;
+    if (this.options.intervalSeconds > 0) {
+      this.timer = setInterval(() => void this.report().catch(() => {}), this.options.intervalSeconds * 1000);
+      this.timer.unref();
+    }
+    const heartbeatSeconds = this.options.progressHeartbeatSeconds ?? 0;
+    if (heartbeatSeconds > 0) {
+      this.progressTimer = setInterval(
+        () => void this.reportProgressHeartbeat().catch(() => {}),
+        heartbeatSeconds * 1000,
+      );
+      this.progressTimer.unref();
+    }
   }
 
   private async finishRun(): Promise<void> {
@@ -178,7 +200,9 @@ export class RunReporter {
 
   private stopTimer(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.progressTimer) clearInterval(this.progressTimer);
     this.timer = undefined;
+    this.progressTimer = undefined;
   }
 
   private recordAssistantMessage(value: unknown): void {
@@ -196,7 +220,8 @@ export class RunReporter {
     if (toolName !== "task") return;
     const toolCallId = String(frame.toolCallId ?? `task-${this.runningStages.size + 1}`);
     const labels = taskItems(frame.args).map((item) => stageLabel(String(item.agent ?? "task"), item.name));
-    this.runningStages.set(toolCallId, { labels, startedAt: this.now() });
+    const startedAt = this.now();
+    this.runningStages.set(toolCallId, { labels, startedAt, lastHeartbeatAt: startedAt });
     if (!this.options.readableProgress) return;
     const heading = labels.length === 1 ? `${labels[0]} started` : `${labels.length} specialist tasks started`;
     const detail = labels.length === 1
@@ -238,6 +263,11 @@ export class RunReporter {
     const results = Array.isArray(details?.results) ? details.results : [];
     const toolCallId = String(frame.toolCallId ?? "task");
     for (const value of results) this.settleTaskResult(toolCallId, value);
+    const persisted = this.persistTaskResult(toolCallId, results, frameFailed);
+    if (!persisted && this.options.taskResultDirectoryPath) {
+      this.issues += 1;
+      await this.options.send("⚠️ Courier could not persist the normalized task envelope. The lead must record the gate evidence before advancing.");
+    }
     if (frameFailed && results.length === 0) this.issues += 1;
     const stage = this.runningStages.get(toolCallId);
     this.runningStages.delete(toolCallId);
@@ -292,6 +322,78 @@ export class RunReporter {
     const labels = [...this.runningStages.values()].flatMap((stage) => stage.labels);
     if (labels.length === 0) return "The lead agent is coordinating and synthesizing the work.";
     return labels.join(", ");
+  }
+
+  private async reportProgressHeartbeat(): Promise<void> {
+    if (!this.active || this.runningStages.size === 0) return;
+    const heartbeatMs = Math.max(1, this.options.progressHeartbeatSeconds ?? 0) * 1000;
+    const now = this.now();
+    const stages = [...this.runningStages.values()].filter((stage) => now - stage.lastHeartbeatAt >= heartbeatMs);
+    if (stages.length === 0) return;
+    for (const stage of stages) stage.lastHeartbeatAt = now;
+    const labels = stages.flatMap((stage) => stage.labels);
+    const oldest = Math.min(...stages.map((stage) => stage.startedAt));
+    await this.options.send(
+      `⏳ **Still working · ${formatDuration(now - oldest)}**\n${labels.join(", ")} is active. No action is needed.`,
+    );
+  }
+
+  private persistTaskResult(toolCallId: string, values: unknown[], failed: boolean): boolean {
+    const directory = this.options.taskResultDirectoryPath;
+    if (!directory) return true;
+    try {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const normalized = values.map((value) => {
+        const result = record(value) ?? {};
+        return {
+          id: result.id ?? result.index ?? "unknown",
+          agent: result.agent ?? "task",
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          resolvedModel: result.resolvedModel,
+          usage: result.usage,
+          structuredOutput: result.structuredOutput,
+          error: result.error,
+        };
+      });
+      const envelope = {
+        schemaVersion: 1,
+        toolCallId,
+        failed,
+        results: normalized,
+      };
+      let serialized = `${JSON.stringify(envelope, null, 2)}\n`;
+      if (Buffer.byteLength(serialized) > MAX_TASK_RESULT_BYTES) {
+        serialized = `${JSON.stringify({
+          schemaVersion: 1,
+          toolCallId,
+          failed,
+          omitted: "normalized result exceeded the durable artifact limit",
+          sha256: createHash("sha256").update(serialized).digest("hex"),
+          bytes: Buffer.byteLength(serialized),
+          results: normalized.map((result) => ({
+            id: result.id,
+            agent: result.agent,
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+            resolvedModel: result.resolvedModel,
+            usage: result.usage,
+            error: result.error,
+          })),
+        }, null, 2)}\n`;
+      }
+      let target: string;
+      do {
+        const sequence = String(++this.taskResultSequence).padStart(4, "0");
+        target = path.join(directory, `${sequence}-${safeFilename(toolCallId)}.json`);
+      } while (fs.existsSync(target));
+      fs.writeFileSync(target, serialized, { mode: 0o600, flag: "wx" });
+      return true;
+    } catch {
+      // Reporting artifacts are a mirror of the native task result. They must
+      // never break the OMP RPC lifecycle if the workspace becomes read-only.
+      return false;
+    }
   }
 
   private countTool(toolName: string): void {
@@ -480,6 +582,10 @@ function displayModel(model: string): string {
 
 function readableWords(value: string): string {
   return value.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function safeFilename(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "task";
 }
 
 function formatTokens(value: number): string {

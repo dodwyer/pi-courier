@@ -115,6 +115,15 @@ export class ControlServer {
           const thread = await this.workers.resumeWorkspace(workspace, request.message ?? "");
           return this.respond(socket, { ok: true, thread });
         }
+        case "migrate": {
+          const workspace = requiredWorkspace(request);
+          const thread = await this.workers.migrateWorkspace(workspace);
+          return this.respond(socket, { ok: true, thread });
+        }
+        case "audit-artifacts": {
+          const workspace = requiredWorkspace(request);
+          return this.respond(socket, { ok: true, violations: this.workers.auditArtifacts(workspace) });
+        }
         case "watch": {
           const workspace = requiredWorkspace(request);
           if (!this.workers.store.getWorkspace(workspace)) throw new Error(`Unknown workspace ${workspace}`);

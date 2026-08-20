@@ -58,6 +58,17 @@ export class CourierRouter {
           await this.reply(msg, `✅ New OMP session started with profile **${record.profile}**.`, record.rootEventId);
         });
         return;
+      case "!migrate":
+        await this.withError(msg, async () => {
+          if (parts.length !== 0) throw new Error("Usage: !migrate");
+          const record = await this.deps.workers.migrate(msg);
+          await this.reply(
+            msg,
+            `✅ Workflow contract migrated for **${record.workspace}**. The new lead is reconciling the durable ledger and will stop before product work.`,
+            record.rootEventId,
+          );
+        });
+        return;
       case "!status":
         await this.withError(msg, async () => {
           const record = this.deps.workers.status(msg);
@@ -71,6 +82,7 @@ export class CourierRouter {
               ...(runtime ? [`Environment: **${runtime.state}** (\`${runtime.instance}\`, workspace \`${runtime.guestWorkspace}\`)`] : ["Environment: **host**"]),
               `Path: \`${record.workspacePath}\``,
               `Session: \`${record.sessionFile ?? "not created yet"}\``,
+              `Workflow contract: \`${record.workflowContractHash?.slice(0, 12) ?? "legacy (resume-compatible)"}\``,
             ].join("\n"),
             record.rootEventId,
           );
@@ -158,6 +170,7 @@ function helpText(): string {
     "• `!start development <workspace> --brief <source-workspace>/development-briefs/<brief>.md`",
     "• `!continue <workspace>`",
     "• `!new [profile]`",
+    "• `!migrate` after Courier reports a changed workflow contract",
     "• `!status`, `!stop`, `!abort`",
     "• `!approve <id>`, `!deny <id>`",
     "• `!choose <id> <number>`, `!answer <id> <text>`, `!cancel <id>`",

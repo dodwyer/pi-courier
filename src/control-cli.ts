@@ -91,6 +91,24 @@ async function main(): Promise<void> {
       console.log(`Run resumed for ${workspace}. Progress and usage updates will be posted to its Matrix thread.`);
       return;
     }
+    case "migrate": {
+      if (!workspace || rest.length) throw new Error("Usage: courierctl migrate <workspace>");
+      await request({ command: "migrate", workspace });
+      console.log(`Workflow contract migrated for ${workspace}. The reconciliation gate is running in Matrix.`);
+      return;
+    }
+    case "artifacts": {
+      if (!workspace || rest.length) throw new Error("Usage: courierctl artifacts <workspace>");
+      const [response] = await request({ command: "audit-artifacts", workspace });
+      const violations = response.violations as Array<{ path: string; reason: string; detail: string }>;
+      if (!violations.length) {
+        console.log(`Artifact policy passed for ${workspace}.`);
+        return;
+      }
+      for (const violation of violations) console.log(`${violation.reason}\t${violation.path}\t${violation.detail}`);
+      process.exitCode = 1;
+      return;
+    }
     default:
       usage();
       process.exitCode = 2;
@@ -207,6 +225,7 @@ function usage(): void {
     "Usage:",
     "  courierctl list | status <workspace> | watch <workspace> [--raw]",
     "  courierctl resume <workspace> <message...> | attach <workspace> [--abort] | adopt <workspace>",
+    "  courierctl migrate <workspace> | artifacts <workspace>",
     "  courierctl env list",
     "  courierctl env status|start|shell|stop <workspace>",
     "  courierctl env rebuild|destroy <workspace> --confirm <workspace>",

@@ -31,6 +31,32 @@ export interface ReplyContext {
 
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
+export interface WorkflowContractConfig {
+  /** Versioned workflow semantics. Changing this requires an explicit migration. */
+  version: string;
+  /** Workspace-relative directory containing the private workflow ledger. */
+  stateDirectory: string;
+  /** Files whose contents define the prompt bundle for this workflow. */
+  promptFiles: string[];
+  /** Exact provider/model/effort mapping expected by the workflow. */
+  expectedModels: Record<string, string>;
+  /** Immutable identity for the VM toolchain or host tool bundle. */
+  toolchainIdentity: string;
+  /** Atomic workspace-relative request file consumed at an accepted boundary. */
+  rotationRequestFile?: string;
+}
+
+export interface ArtifactPolicyConfig {
+  /** Workspace-relative private artifact root. */
+  root: string;
+  /** Directory basenames that must not be persisted below the artifact root. */
+  forbiddenDirectories: string[];
+  /** Maximum size of one persisted artifact. */
+  maxFileBytes: number;
+  /** Reject executable regular files below the artifact root. */
+  forbidExecutables?: boolean;
+}
+
 export interface OmpProfileConfig {
   tools: string[];
   approvalMode: ApprovalMode;
@@ -44,6 +70,10 @@ export interface OmpProfileConfig {
   runtime?: string;
   /** Optional workspace-kind boundary for host-only or managed-only profiles. */
   workspaceKinds?: Array<"managed" | "external">;
+  /** Immutable workflow identity captured for new runs and checked on resume. */
+  workflowContract?: WorkflowContractConfig;
+  /** Auditable policy for small, durable workspace-private artifacts. */
+  artifactPolicy?: ArtifactPolicyConfig;
 }
 
 export interface LxdVmRuntimeConfig {
@@ -86,6 +116,8 @@ export interface RunReportingConfig {
   readableProgress?: boolean;
   /** Send one final per-model usage summary when the run settles. */
   finalUsage?: boolean;
+  /** Emit a concise heartbeat for a still-running delegated stage at this cadence. */
+  progressHeartbeatSeconds?: number;
 }
 
 /**

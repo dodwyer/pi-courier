@@ -31,6 +31,7 @@ Matrix 线程 -> OMP Courier -> omp --mode rpc-ui
 !start development nomadbuild --brief nomadchef-ai/development-briefs/nomadbuild.md
 !continue nomadmade
 !new [profile]
+!migrate
 !status
 !stop
 !abort
@@ -58,6 +59,8 @@ OMP 以所选工作区作为当前目录运行，因此报告、代码和其他�
 
 Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更新和按模型统计的 token 报告。运行中的子代理使用 OMP 的实时 token 计数并标记为 `~`；task 结束后，会用精确的输入、输出、缓存读取和缓存写入总数替换估算值。设置 `hideToolCalls` 可避免在普通 Matrix 回复中显示原始工具名称和参数；需要协议级输出的运维人员仍可使用 `courierctl watch --raw`。
 
+启用 workflow contract 的 profile 会在运行开始时记录确定性的 schema-v2 身份，包括 profile 配置、prompt bundle、精确的角色/模型映射、runtime 镜像和工具链。身份变化会在产品工作开始前阻止恢复；`!migrate` 会启动新的 lead 会话，并只执行 ledger 对账。没有历史 contract 的旧运行仍可恢复。Courier 会机械地持久化 task envelope，并可在已接受任务边界消费原子 rotation packet，从而无需额外的“持久化”模型任务。
+
 ## 配置
 
 用 `PI_COURIER_CONFIG` 指向 root 管理的 JSON 配置。秘密值应通过文件引用，不应直接写入配置。
@@ -81,6 +84,7 @@ Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更�
   "hideToolCalls": true,
   "runReporting": {
     "intervalSeconds": 600,
+    "progressHeartbeatSeconds": 60,
     "readableProgress": true,
     "finalUsage": true
   },
@@ -104,7 +108,21 @@ Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更�
       "statusFile": ".courier/development/status.md",
       "matrixUpdatesFromStatus": true,
       "runtime": "development-vm",
-      "workspaceKinds": ["managed"]
+      "workspaceKinds": ["managed"],
+      "workflowContract": {
+        "version": "development-v2",
+        "stateDirectory": ".courier/development",
+        "promptFiles": ["/etc/omp-courier/prompts/development/AGENTS.md"],
+        "expectedModels": { "lead": "provider/model:max" },
+        "toolchainIdentity": "omp-17.2.10;runtime-image-generation",
+        "rotationRequestFile": ".courier/development/rotate.json"
+      },
+      "artifactPolicy": {
+        "root": ".courier",
+        "forbiddenDirectories": [".venv", "node_modules", "target", "cache", "tools"],
+        "maxFileBytes": 5242880,
+        "forbidExecutables": true
+      }
     }
   }
 }
@@ -120,6 +138,8 @@ courierctl status nomadmade
 courierctl watch nomadmade
 courierctl watch nomadmade --raw
 courierctl resume nomadmade "Continue from the current recorded gate."
+courierctl migrate nomadmade
+courierctl artifacts nomadmade
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
@@ -135,9 +155,11 @@ courierctl env tunnel-command nomadmade 8080 18080
 
 `watch` 是并发只读的精简事件视图，不是完整的 OMP 交互界面。默认情况下，它会把助手文本中的字面 `\n` 和 `\r\n` 渲染成换行，即使转义序列被拆分到多个流式 frame 中也能处理。需要查看精确原始流时使用 `--raw`。`resume` 会通过原有的 Matrix 所属 worker 重启已停止的工作区，因此可读进度和定期用量仍会发送到线程。`attach` 提供完整原生 TUI，因此会独占工作区直到退出；独占期间 Matrix 进度和用量报告不可用。
 
+`migrate` 是 workflow contract 变化后的显式关卡：它启动新的 lead 上下文，并在原 Matrix 线程发送仅用于对账的回合。`artifacts` 会只读审计 profile 的私有产物根目录；发现被禁止的缓存、虚拟环境、依赖树、可执行文件或超大文件时返回非零状态。
+
 `env shell` 会启动工作区虚拟机供运维人员使用，并在 shell 退出后停止它。重建和销毁必须用工作区名称显式确认，两者都会保留主机上的工作区文件。`tunnel-command` 只为正在运行的虚拟机打印 SSH 本地转发命令，不会自行打开监听端口。
 
-当 profile 启用 `matrixUpdatesFromStatus` 时，Courier 会投影工作区内的 `statusFile`，而不是转发 lead agent 的原始回合文本。优先使用精简的 `## Matrix update` 项目符号块，并在下一个标题或空行块边界处结束；旧文件则退回显示 `Status`、`Current gate` 和 `Updated` 字段。工作区外的文件、非普通文件以及大于 256 KiB 的文件都会被忽略。相同的投影也会显示在定期的按模型用量报告中。令牌总数采用提供商报告的处理量，并细分为输入、缓存读取/写入和输出，以便看清长上下文的缓存活动。
+当 profile 启用 `matrixUpdatesFromStatus` 时，Courier 会投影工作区内的 `statusFile`，而不是转发 lead agent 的原始回合文本。优先使用精简的 `## Matrix update` 项目符号块，并在下一个标题或空行块边界处结束；旧文件则退回显示 `Status`、`Current gate` 和 `Updated` 字段。工作区外的文件、非普通文件以及大于 256 KiB 的文件都会被忽略。相同的投影也会显示在定期的按模型用量报告中；如果内容没有变化，Courier 只发送一行 heartbeat，不再重复整段状态。长时间运行的委派阶段可发送独立且有界的进度 heartbeat。令牌总数采用提供商报告的处理量，并细分为输入、缓存读取/写入和输出，以便看清长上下文的缓存活动。
 
 ## 隔离的 E2E canary
 

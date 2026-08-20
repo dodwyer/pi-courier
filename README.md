@@ -31,6 +31,7 @@ Matrix thread -> OMP Courier -> omp --mode rpc-ui
 !start development nomadbuild --brief nomadchef-ai/development-briefs/nomadbuild.md
 !continue nomadmade
 !new [profile]
+!migrate
 !status
 !stop
 !abort
@@ -69,6 +70,15 @@ replace them when the task settles. Set `hideToolCalls` to keep raw tool names
 and arguments out of normal Matrix replies; `courierctl watch --raw` remains
 available to an operator who needs protocol-level output.
 
+Contracted workflows capture a deterministic schema-v2 identity for the
+profile configuration, prompt bundle, exact role/model map, runtime image, and
+toolchain when the run starts. A changed identity blocks resume before product
+work; `!migrate` starts a clean lead session with a reconciliation-only prompt.
+Legacy runs without a captured identity remain resume-compatible. Contracted
+task envelopes are persisted mechanically, and an atomic rotation packet can
+start a fresh lead session at an accepted task boundary without a model-only
+"persistence" task.
+
 ## Configuration
 
 Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced by file, not embedded.
@@ -96,6 +106,7 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
   "hideToolCalls": true,
   "runReporting": {
     "intervalSeconds": 600,
+    "progressHeartbeatSeconds": 60,
     "readableProgress": true,
     "finalUsage": true
   },
@@ -119,7 +130,21 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
       "statusFile": ".courier/development/status.md",
       "matrixUpdatesFromStatus": true,
       "runtime": "development-vm",
-      "workspaceKinds": ["managed"]
+      "workspaceKinds": ["managed"],
+      "workflowContract": {
+        "version": "development-v2",
+        "stateDirectory": ".courier/development",
+        "promptFiles": ["/etc/omp-courier/prompts/development/AGENTS.md"],
+        "expectedModels": { "lead": "provider/model:max" },
+        "toolchainIdentity": "omp-17.2.10;runtime-image-generation",
+        "rotationRequestFile": ".courier/development/rotate.json"
+      },
+      "artifactPolicy": {
+        "root": ".courier",
+        "forbiddenDirectories": [".venv", "node_modules", "target", "cache", "tools"],
+        "maxFileBytes": 5242880,
+        "forbidExecutables": true
+      }
     }
   },
   "externalWorkspaces": {
@@ -142,6 +167,8 @@ courierctl status nomadmade
 courierctl watch nomadmade
 courierctl watch nomadmade --raw
 courierctl resume nomadmade "Continue from the current recorded gate."
+courierctl migrate nomadmade
+courierctl artifacts nomadmade
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
@@ -157,9 +184,15 @@ courierctl env tunnel-command nomadmade 8080 18080
 
 `watch` is read-only and concurrent, but it is a compact event renderer rather than OMP's exact interactive UI. By default it renders literal `\n` and `\r\n` sequences in assistant text as line breaks, including escapes split across stream frames. Use `--raw` when exact streamed text matters. `resume` restarts a stopped workspace through its existing Matrix-owned worker, so readable progress and periodic usage continue to reach the thread. `attach` provides the exact TUI and therefore takes an exclusive workspace lease until it exits; Matrix progress and usage reporting are unavailable during that lease.
 
+`migrate` is the explicit gate for a changed workflow contract; it starts a new
+lead context and posts a reconciliation-only turn to the existing Matrix
+thread. `artifacts` performs a read-only audit of the profile's private artifact
+root and exits non-zero for forbidden caches, virtual environments, dependency
+trees, executables, or oversized files.
+
 `env shell` starts the workspace VM for an operator shell and stops it on exit. Rebuild and destroy require the workspace name as an explicit confirmation; both retain the host workspace files. `tunnel-command` prints an SSH local-forward command for a running VM and does not open a listener itself.
 
-When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A compact `## Matrix update` bullet block is preferred and ends at the next heading or blank-line block boundary; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports. Token totals are provider-reported processing totals and are broken down into input, cache reads/writes, and output so long-context cache activity is visible.
+When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A compact `## Matrix update` bullet block is preferred and ends at the next heading or blank-line block boundary; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports; when it has not changed, Courier emits a one-line heartbeat instead of repeating it. Long delegated stages can emit a separate bounded progress heartbeat. Token totals are provider-reported processing totals and are broken down into input, cache reads/writes, and output so long-context cache activity is visible.
 
 ## Isolated E2E canary
 
