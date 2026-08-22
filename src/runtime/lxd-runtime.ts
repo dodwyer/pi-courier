@@ -218,23 +218,38 @@ export class LxdRuntimeManager {
     references: WorkspaceReferenceRecord[],
   ): Promise<void> {
     if (references.length === 0) return;
-    const shown = await this.run(runtime, [
-      "config", "show", `${runtime.remote}:${instance}`,
-      "--project", runtime.project,
-      "--format", "json",
-    ]);
-    const config = JSON.parse(shown.stdout || "{}") as LxdInstance;
     for (const reference of references) {
       const device = `reference-${createHash("sha256")
         .update(reference.sourceWorkspace)
         .digest("hex")
         .slice(0, 12)}`;
-      const existing = config.devices?.[device];
-      if (existing) {
+      let existingType: string | undefined;
+      try {
+        existingType = (await this.run(runtime, [
+          "config", "device", "get", `${runtime.remote}:${instance}`, device, "type",
+          "--project", runtime.project,
+        ])).stdout.trim();
+      } catch {
+        // A missing device is the normal first-mount case.
+      }
+      if (existingType) {
+        const source = (await this.run(runtime, [
+          "config", "device", "get", `${runtime.remote}:${instance}`, device, "source",
+          "--project", runtime.project,
+        ])).stdout.trim();
+        const guestPath = (await this.run(runtime, [
+          "config", "device", "get", `${runtime.remote}:${instance}`, device, "path",
+          "--project", runtime.project,
+        ])).stdout.trim();
+        const readOnly = (await this.run(runtime, [
+          "config", "device", "get", `${runtime.remote}:${instance}`, device, "readonly",
+          "--project", runtime.project,
+        ])).stdout.trim();
         if (
-          existing.source !== reference.hostPath
-          || existing.path !== reference.guestPath
-          || existing.readonly !== "true"
+          existingType !== "disk"
+          || source !== reference.hostPath
+          || guestPath !== reference.guestPath
+          || readOnly !== "true"
         ) {
           await this.run(runtime, [
             "config", "device", "remove", `${runtime.remote}:${instance}`, device,

@@ -77,6 +77,8 @@ describe("LxdRuntimeManager", () => {
     expect(referenceDevice).toMatchObject({ source: hostPath, readonly: "true", type: "disk" });
     const commands = readFileSync(fixture.log, "utf-8");
     expect(commands.indexOf(reference.guestPath)).toBeLessThan(commands.indexOf('"start"'));
+    expect(commands).toContain('"config","device","get"');
+    expect(commands).not.toContain('"config","show"');
   });
 
   it("rejects isolated runtimes for declared external workspaces", async () => {
@@ -114,8 +116,15 @@ if (args[0] === "list") {
   process.stdout.write(JSON.stringify(instances));
 } else if (args[0] === "init") {
   instances.push({name, status:"Stopped", status_code:102, config:{}, devices:{}});
-} else if (args[0] === "config" && args[1] === "show") {
-  process.stdout.write(JSON.stringify(instances.find(value => value.name === name)));
+} else if (args[0] === "config" && args[1] === "device" && args[2] === "get") {
+  const instance = instances.find(value => value.name === name);
+  const device = instance.devices[args[4]];
+  if (!device) {
+    process.stderr.write("Error: Device doesn't exist\\n");
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(String(device[args[5]] || ""));
+  }
 } else if (args[0] === "config" && args[1] === "device" && args[2] === "add") {
   const instance = instances.find(value => value.name === name);
   const device = {type: args[5]};
