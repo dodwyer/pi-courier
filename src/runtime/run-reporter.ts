@@ -8,10 +8,19 @@ interface RunReporterOptions {
   readableProgress: boolean;
   finalUsage: boolean;
   progressHeartbeatSeconds?: number;
+  format?: "detailed" | "operator";
+  usageMode?: "tokens" | "capacity" | "none";
+  capacityStaleSeconds?: number;
+  timeZone?: string;
+  runLabel?: string;
+  authBroker?: { url: string; tokenFile: string };
+  capacityFetcher?: () => Promise<unknown>;
+  initialModels?: string[];
   send: (text: string) => Promise<void>;
   statusFilePath?: string;
   workspacePath?: string;
   taskResultDirectoryPath?: string;
+  stateFilePath?: string;
   now?: () => number;
 }
 
@@ -32,6 +41,40 @@ interface RunningStage {
   labels: string[];
   startedAt: number;
   lastHeartbeatAt: number;
+}
+
+interface OperatorStatus {
+  finished: string;
+  current: string;
+  next: string;
+  actionNeeded?: string;
+}
+
+interface CapacityLimit {
+  provider: string;
+  windowId: string;
+  tier?: string;
+  modelId?: string;
+  shared?: boolean;
+  remaining: number;
+  resetsAt?: number;
+  status?: string;
+}
+
+interface CapacitySnapshot {
+  fetchedAt: number;
+  limits: CapacityLimit[];
+}
+
+interface ReporterCheckpoint {
+  schemaVersion: 1;
+  active: boolean;
+  startedAt: number;
+  lastOperatorUpdateAt: number;
+  usedModels: string[];
+  lastCapacity?: CapacitySnapshot;
+  lastFinished?: string;
+  nextActionHint?: string;
 }
 
 type ReportKind = "periodic" | "final";
@@ -67,9 +110,22 @@ export class RunReporter {
   private issues = 0;
   private lastStatusProjection?: string;
   private taskResultSequence = 0;
+  private restoredActive = false;
+  private lastOperatorUpdateAt = 0;
+  private readonly usedModels = new Set<string>();
+  private lastCapacity?: CapacitySnapshot;
+  private lastFinished = "No phase completed since the previous update.";
+  private nextActionHint = "Continue to the next incomplete workflow gate.";
 
   constructor(private readonly options: RunReporterOptions) {
     this.now = options.now ?? Date.now;
+    this.loadCheckpoint();
+    for (const model of options.initialModels ?? []) {
+      const normalized = normalizedModel(model);
+      if (normalized) this.usedModels.add(normalized);
+    }
+    this.taskResultSequence = existingTaskResultSequence(options.taskResultDirectoryPath);
+    this.loadModelsFromTaskResults();
   }
 
   async handle(frame: RpcFrame): Promise<void> {
@@ -101,6 +157,10 @@ export class RunReporter {
 
   async report(kind: ReportKind = "periodic"): Promise<void> {
     if (!this.active) return;
+    if (this.options.format === "operator") {
+      await this.reportOperator(kind);
+      return;
+    }
     const rows = this.usageRows();
     const elapsed = Math.max(0, this.now() - this.startedAt);
     const title = kind === "final"
@@ -147,6 +207,15 @@ export class RunReporter {
   }
 
   async reportStatus(): Promise<StatusProjectionResult> {
+    if (this.options.format === "operator") {
+      const status = this.readOperatorStatus();
+      if (!status) return "unavailable";
+      const projection = JSON.stringify(status);
+      if (projection === this.lastStatusProjection) return "unchanged";
+      this.lastStatusProjection = projection;
+      await this.sendOperator(status, "periodic");
+      return "sent";
+    }
     const projection = this.readStatusProjection();
     if (!projection) return "unavailable";
     if (projection === this.lastStatusProjection) return "unchanged";
@@ -163,7 +232,20 @@ export class RunReporter {
   private startRun(): void {
     if (this.active) return;
     this.active = true;
-    this.startedAt = this.now();
+    const continuing = this.restoredActive && this.startedAt > 0;
+    if (!continuing) {
+      this.startedAt = this.now();
+      this.lastOperatorUpdateAt = 0;
+      this.usedModels.clear();
+      for (const model of this.options.initialModels ?? []) {
+        const normalized = normalizedModel(model);
+        if (normalized) this.usedModels.add(normalized);
+      }
+      this.lastCapacity = undefined;
+      this.lastFinished = "No phase completed since the previous update.";
+      this.nextActionHint = "Continue to the next incomplete workflow gate.";
+    }
+    this.restoredActive = false;
     this.exactUsage.clear();
     this.activeTaskUsage.clear();
     this.settledTaskIds.clear();
@@ -174,28 +256,35 @@ export class RunReporter {
     this.commands = 0;
     this.issues = 0;
     this.lastStatusProjection = undefined;
-    this.taskResultSequence = 0;
     if (this.options.intervalSeconds > 0) {
-      this.timer = setInterval(() => void this.report().catch(() => {}), this.options.intervalSeconds * 1000);
-      this.timer.unref();
+      if (this.options.format === "operator") this.scheduleOperatorReport();
+      else {
+        this.timer = setInterval(() => void this.report().catch(() => {}), this.options.intervalSeconds * 1000);
+        this.timer.unref();
+      }
     }
     const heartbeatSeconds = this.options.progressHeartbeatSeconds ?? 0;
-    if (heartbeatSeconds > 0) {
+    if (heartbeatSeconds > 0 && this.options.format !== "operator") {
       this.progressTimer = setInterval(
         () => void this.reportProgressHeartbeat().catch(() => {}),
         heartbeatSeconds * 1000,
       );
       this.progressTimer.unref();
     }
+    this.persistCheckpoint();
   }
 
   private async finishRun(): Promise<void> {
     if (!this.active) return;
     this.stopTimer();
-    if (this.options.finalUsage) await this.report("final");
+    const recentlyReported = this.options.format === "operator"
+      && this.lastOperatorUpdateAt > 0
+      && this.now() - this.lastOperatorUpdateAt < 2_000;
+    if (this.options.finalUsage && !recentlyReported) await this.report("final");
     this.active = false;
     this.runningStages.clear();
     this.activeTaskUsage.clear();
+    this.persistCheckpoint();
   }
 
   private stopTimer(): void {
@@ -211,6 +300,7 @@ export class RunReporter {
     const model = modelKey(message.provider, message.model);
     const usage = usageTotals(message.usage);
     if (!model || !usage) return;
+    this.observeModel(model);
     this.addExactUsage(model, usage);
   }
 
@@ -222,6 +312,12 @@ export class RunReporter {
     const labels = taskItems(frame.args).map((item) => stageLabel(String(item.agent ?? "task"), item.name));
     const startedAt = this.now();
     this.runningStages.set(toolCallId, { labels, startedAt, lastHeartbeatAt: startedAt });
+    if (this.options.format === "operator") {
+      this.nextActionHint = nextActionAfterStage(labels);
+      const status = await this.reportStatus();
+      if (status === "unavailable") await this.reportOperator("periodic");
+      return;
+    }
     if (!this.options.readableProgress) return;
     const heading = labels.length === 1 ? `${labels[0]} started` : `${labels.length} specialist tasks started`;
     const detail = labels.length === 1
@@ -246,6 +342,7 @@ export class RunReporter {
       if (["completed", "failed", "aborted"].includes(status)) {
         if (!this.settledTaskIds.has(id)) this.activeTaskUsage.delete(key);
       } else if (model && tokens !== undefined) {
+        this.observeModel(model);
         this.activeTaskUsage.set(key, { model, tokens });
       }
     }
@@ -271,6 +368,15 @@ export class RunReporter {
     if (frameFailed && results.length === 0) this.issues += 1;
     const stage = this.runningStages.get(toolCallId);
     this.runningStages.delete(toolCallId);
+    if (this.options.format === "operator") {
+      if (stage) {
+        this.lastFinished = operatorStageOutcome(stage, results, this.now());
+        this.nextActionHint = nextActionAfterStage(stage.labels);
+      }
+      const status = await this.reportStatus();
+      if (status === "unavailable") await this.reportOperator("periodic");
+      return;
+    }
     if (!this.options.readableProgress || !stage) return;
     await this.options.send(formatStageResult(stage, results, this.now()));
   }
@@ -282,6 +388,7 @@ export class RunReporter {
     const model = normalizedModel(result.resolvedModel)
       ?? this.activeTaskUsage.get(`${toolCallId}:${id}`)?.model;
     const usage = usageTotals(result.usage);
+    if (model) this.observeModel(model);
     if (!this.settledTaskIds.has(id) && model && usage) {
       this.addExactUsage(model, usage);
       this.settledTaskIds.add(id);
@@ -322,6 +429,154 @@ export class RunReporter {
     const labels = [...this.runningStages.values()].flatMap((stage) => stage.labels);
     if (labels.length === 0) return "The lead agent is coordinating and synthesizing the work.";
     return labels.join(", ");
+  }
+
+  private async reportOperator(kind: ReportKind): Promise<void> {
+    const status = this.readOperatorStatus() ?? {
+      finished: this.lastFinished,
+      current: this.currentWork(),
+      next: kind === "final" ? "Await the next operator request." : this.nextActionHint,
+    };
+    this.lastStatusProjection = JSON.stringify(status);
+    await this.sendOperator(status, kind);
+  }
+
+  private async sendOperator(status: OperatorStatus, kind: ReportKind): Promise<void> {
+    await this.refreshCapacity();
+    const elapsed = Math.max(0, this.now() - this.startedAt);
+    const label = readableWords(this.options.runLabel ?? "run");
+    const lines = [
+      `⏱️ **${label} update · ${formatOperatorElapsed(elapsed)}**`,
+      "",
+      `**Finished:** ${status.finished}`,
+      `**Current:** ${status.current}`,
+      `**Next:** ${status.next}`,
+      ...(status.actionNeeded ? [`**Action needed:** ${status.actionNeeded}`] : []),
+    ];
+    if ((this.options.usageMode ?? "tokens") === "capacity") {
+      lines.push("", ...this.capacityLines());
+    }
+    await this.options.send(lines.join("\n"));
+    this.lastOperatorUpdateAt = this.now();
+    this.persistCheckpoint();
+    if (this.active && kind === "periodic") this.scheduleOperatorReport();
+  }
+
+  private scheduleOperatorReport(): void {
+    if (this.options.format !== "operator" || !this.active || this.options.intervalSeconds <= 0) return;
+    if (this.timer) clearTimeout(this.timer);
+    const intervalMs = this.options.intervalSeconds * 1000;
+    const anchor = this.lastOperatorUpdateAt || this.startedAt;
+    const delay = Math.max(1, intervalMs - Math.max(0, this.now() - anchor));
+    this.timer = setTimeout(() => void this.report().catch(() => this.scheduleOperatorReport()), delay);
+    this.timer.unref();
+  }
+
+  private async refreshCapacity(): Promise<void> {
+    if ((this.options.usageMode ?? "tokens") !== "capacity") return;
+    try {
+      let payload: unknown;
+      if (this.options.capacityFetcher) payload = await this.options.capacityFetcher();
+      else if (this.options.authBroker) {
+        const token = fs.readFileSync(this.options.authBroker.tokenFile, "utf-8").trim();
+        const response = await fetch(new URL("/v1/usage", this.options.authBroker.url), {
+          headers: { authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!response.ok) throw new Error(`broker returned ${response.status}`);
+        payload = await response.json();
+      } else return;
+      const snapshot = normalizeCapacityPayload(payload);
+      if (snapshot) this.lastCapacity = snapshot;
+    } catch {
+      // Capacity is advisory operator telemetry. A stale marker is safer than
+      // failing the OMP run or replacing it with inferred token counts.
+    }
+  }
+
+  private capacityLines(): string[] {
+    const snapshot = this.lastCapacity;
+    if (!snapshot) return ["**Capacity left:** unavailable"];
+    const staleAfterMs = Math.max(1, this.options.capacityStaleSeconds ?? 900) * 1000;
+    const stale = this.now() - snapshot.fetchedAt > staleAfterMs;
+    const relevant = relevantCapacityLimits(snapshot.limits, this.usedModels);
+    if (relevant.length === 0) {
+      const checked = formatClock(snapshot.fetchedAt, this.options.timeZone);
+      return [`**Capacity left:** unavailable for the models observed in this run · checked ${checked}${stale ? " · stale" : ""}`];
+    }
+    const title = stale
+      ? `**Capacity left · stale since ${formatClock(snapshot.fetchedAt, this.options.timeZone)}:**`
+      : "**Capacity left:**";
+    return [title, ...formatCapacityGroups(relevant, this.options.timeZone).map((line) => `• ${line}`)];
+  }
+
+  private observeModel(model: string): void {
+    const normalized = normalizedModel(model);
+    if (!normalized || this.usedModels.has(normalized)) return;
+    this.usedModels.add(normalized);
+    this.persistCheckpoint();
+  }
+
+  private loadCheckpoint(): void {
+    const stateFilePath = this.options.stateFilePath;
+    if (!stateFilePath) return;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(stateFilePath, "utf-8")) as ReporterCheckpoint;
+      if (parsed.schemaVersion !== 1) return;
+      this.restoredActive = parsed.active === true;
+      this.startedAt = nonNegativeNumber(parsed.startedAt) ?? 0;
+      this.lastOperatorUpdateAt = nonNegativeNumber(parsed.lastOperatorUpdateAt) ?? 0;
+      for (const model of parsed.usedModels ?? []) this.observeModel(model);
+      if (parsed.lastCapacity && nonNegativeNumber(parsed.lastCapacity.fetchedAt) !== undefined) {
+        this.lastCapacity = parsed.lastCapacity;
+      }
+      if (typeof parsed.lastFinished === "string") this.lastFinished = cleanOperatorField(parsed.lastFinished);
+      if (typeof parsed.nextActionHint === "string") this.nextActionHint = cleanOperatorField(parsed.nextActionHint);
+    } catch {
+      // A missing or partial checkpoint only affects presentation continuity.
+    }
+  }
+
+  private persistCheckpoint(): void {
+    const stateFilePath = this.options.stateFilePath;
+    if (!stateFilePath) return;
+    try {
+      fs.mkdirSync(path.dirname(stateFilePath), { recursive: true, mode: 0o700 });
+      const payload: ReporterCheckpoint = {
+        schemaVersion: 1,
+        active: this.active || this.restoredActive,
+        startedAt: this.startedAt,
+        lastOperatorUpdateAt: this.lastOperatorUpdateAt,
+        usedModels: [...this.usedModels].sort(),
+        lastCapacity: this.lastCapacity,
+        lastFinished: this.lastFinished,
+        nextActionHint: this.nextActionHint,
+      };
+      const temporary = `${stateFilePath}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, stateFilePath);
+    } catch {
+      // Reporting state must never break the agent lifecycle.
+    }
+  }
+
+  private loadModelsFromTaskResults(): void {
+    const directory = this.options.taskResultDirectoryPath;
+    if (!directory) return;
+    try {
+      for (const name of fs.readdirSync(directory).filter((candidate) => candidate.endsWith(".json")).slice(-2_000)) {
+        const target = path.join(directory, name);
+        if (fs.statSync(target).size > MAX_TASK_RESULT_BYTES) continue;
+        const envelope = record(JSON.parse(fs.readFileSync(target, "utf-8")));
+        const results = Array.isArray(envelope?.results) ? envelope.results : [];
+        for (const result of results) {
+          const model = normalizedModel(record(result)?.resolvedModel);
+          if (model) this.usedModels.add(model);
+        }
+      }
+    } catch {
+      // Existing artifacts are only a continuity aid.
+    }
   }
 
   private async reportProgressHeartbeat(): Promise<void> {
@@ -403,6 +658,16 @@ export class RunReporter {
   }
 
   private readStatusProjection(): string | undefined {
+    const markdown = this.readStatusMarkdown();
+    return markdown ? projectStatusMarkdown(markdown) : undefined;
+  }
+
+  private readOperatorStatus(): OperatorStatus | undefined {
+    const markdown = this.readStatusMarkdown();
+    return markdown ? projectOperatorStatus(markdown) : undefined;
+  }
+
+  private readStatusMarkdown(): string | undefined {
     const statusFilePath = this.options.statusFilePath;
     const workspacePath = this.options.workspacePath;
     if (!statusFilePath || !workspacePath) return undefined;
@@ -412,7 +677,7 @@ export class RunReporter {
       if (realStatus !== realWorkspace && !realStatus.startsWith(`${realWorkspace}${path.sep}`)) return undefined;
       const stat = fs.statSync(realStatus);
       if (!stat.isFile() || stat.size > MAX_STATUS_BYTES) return undefined;
-      return projectStatusMarkdown(fs.readFileSync(realStatus, "utf-8"));
+      return fs.readFileSync(realStatus, "utf-8");
     } catch {
       return undefined;
     }
@@ -440,6 +705,173 @@ export function projectStatusMarkdown(markdown: string): string | undefined {
   ].filter((line): line is string => line !== undefined);
   if (lines.length === 0) return undefined;
   return limitProjection(`📍 **Workspace status**\n${lines.join("\n")}`);
+}
+
+export function projectOperatorStatus(markdown: string): OperatorStatus | undefined {
+  const normalized = markdown.replaceAll("\0", "�").replace(/\r\n?/g, "\n");
+  const section = normalized.match(/^## Matrix update\s*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/im)?.[1]?.trim();
+  if (!section) return undefined;
+  const fields = new Map<string, string>();
+  const bullets: string[] = [];
+  for (const line of section.split("\n")) {
+    const bullet = line.match(/^[-•]\s+(.+)$/)?.[1]?.trim();
+    if (!bullet) continue;
+    bullets.push(bullet);
+    const field = bullet.match(/^(Finished|Current|Next|Action needed):\s*(.+)$/i);
+    if (field) fields.set(field[1].toLowerCase(), cleanOperatorField(field[2]));
+  }
+  const finished = fields.get("finished") ?? bullets[0];
+  const current = fields.get("current") ?? bullets[1];
+  const next = fields.get("next") ?? bullets.find((value) => /^next:/i.test(value))?.replace(/^next:\s*/i, "") ?? bullets.at(-1);
+  if (!finished || !current || !next) return undefined;
+  return {
+    finished: cleanOperatorField(finished.replace(/^finished:\s*/i, "")),
+    current: cleanOperatorField(current.replace(/^current:\s*/i, "")),
+    next: cleanOperatorField(next.replace(/^next:\s*/i, "")),
+    ...(fields.get("action needed") ? { actionNeeded: fields.get("action needed") } : {}),
+  };
+}
+
+function cleanOperatorField(value: string): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  return singleLine.length <= 1_000 ? singleLine : `${singleLine.slice(0, 997).trimEnd()}…`;
+}
+
+function normalizeCapacityPayload(value: unknown): CapacitySnapshot | undefined {
+  const reports = record(value)?.reports;
+  if (!Array.isArray(reports)) return undefined;
+  const limits: CapacityLimit[] = [];
+  let fetchedAt = 0;
+  for (const reportValue of reports) {
+    const report = record(reportValue);
+    if (!report) continue;
+    fetchedAt = Math.max(fetchedAt, nonNegativeNumber(report.fetchedAt) ?? 0);
+    const reportProvider = typeof report.provider === "string" ? report.provider : undefined;
+    if (!Array.isArray(report.limits)) continue;
+    for (const limitValue of report.limits) {
+      const limit = record(limitValue);
+      const scope = record(limit?.scope);
+      const window = record(limit?.window);
+      const amount = record(limit?.amount);
+      const provider = typeof scope?.provider === "string" ? scope.provider : reportProvider;
+      const windowId = typeof scope?.windowId === "string"
+        ? scope.windowId
+        : typeof window?.id === "string" ? window.id : undefined;
+      const remaining = nonNegativeNumber(amount?.remaining)
+        ?? (nonNegativeNumber(amount?.remainingFraction) !== undefined ? nonNegativeNumber(amount?.remainingFraction)! * 100 : undefined);
+      if (!provider || !windowId || remaining === undefined) continue;
+      limits.push({
+        provider,
+        windowId,
+        ...(typeof scope?.tier === "string" ? { tier: scope.tier } : {}),
+        ...(typeof scope?.modelId === "string" ? { modelId: scope.modelId } : {}),
+        ...(typeof scope?.shared === "boolean" ? { shared: scope.shared } : {}),
+        remaining: Math.max(0, Math.min(100, remaining)),
+        ...(nonNegativeNumber(window?.resetsAt) !== undefined ? { resetsAt: nonNegativeNumber(window?.resetsAt) } : {}),
+        ...(typeof limit?.status === "string" ? { status: limit.status } : {}),
+      });
+    }
+  }
+  return fetchedAt > 0 && limits.length > 0 ? { fetchedAt, limits } : undefined;
+}
+
+function relevantCapacityLimits(limits: CapacityLimit[], usedModels: ReadonlySet<string>): CapacityLimit[] {
+  const byProvider = new Map<string, string[]>();
+  for (const model of usedModels) {
+    const [provider] = model.split("/");
+    if (!provider) continue;
+    const rows = byProvider.get(provider.toLowerCase()) ?? [];
+    rows.push(model.toLowerCase());
+    byProvider.set(provider.toLowerCase(), rows);
+  }
+  const deduplicated = new Map<string, CapacityLimit>();
+  for (const limit of limits) {
+    const models = byProvider.get(limit.provider.toLowerCase());
+    if (!models?.length) continue;
+    if (limit.tier && !models.some((model) => model.includes(limit.tier!.toLowerCase()))) continue;
+    if (limit.modelId) {
+      const needle = comparableModel(limit.modelId);
+      if (!models.some((model) => comparableModel(model).includes(needle))) continue;
+    }
+    const key = [limit.provider, limit.tier ?? "", limit.modelId ?? "", limit.windowId, limit.remaining, limit.resetsAt ?? ""].join("\0");
+    deduplicated.set(key, limit);
+  }
+  return [...deduplicated.values()];
+}
+
+function formatCapacityGroups(limits: CapacityLimit[], timeZone?: string): string[] {
+  const groups = new Map<string, CapacityLimit[]>();
+  for (const limit of limits) {
+    const label = limit.tier
+      ? limit.provider === "anthropic" ? `Claude ${readableWords(limit.tier)}` : `${providerLabel(limit.provider)} ${readableWords(limit.tier)}`
+      : limit.modelId ? readableWords(limit.modelId) : providerLabel(limit.provider);
+    const rows = groups.get(label) ?? [];
+    rows.push(limit);
+    groups.set(label, rows);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([label, rows]) => {
+      const windows = rows
+        .sort((left, right) => windowOrder(left.windowId) - windowOrder(right.windowId) || left.windowId.localeCompare(right.windowId))
+        .map((limit) => {
+          const reset = limit.resetsAt ? ` · resets ${formatReset(limit.resetsAt, limit.windowId, timeZone)}` : "";
+          return `${Math.round(limit.remaining)}% ${limit.windowId}${reset}`;
+        });
+      return `${label}: ${windows.join("; ")}`;
+    });
+}
+
+function providerLabel(provider: string): string {
+  const labels: Record<string, string> = {
+    "openai-codex": "OpenAI Codex",
+    anthropic: "Anthropic",
+    "google-antigravity": "Google Antigravity",
+  };
+  return labels[provider] ?? readableWords(provider);
+}
+
+function comparableModel(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function windowOrder(value: string): number {
+  const match = value.match(/^(\d+)([hdw])$/i);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const multiplier = match[2].toLowerCase() === "h" ? 1 : match[2].toLowerCase() === "d" ? 24 : 168;
+  return Number(match[1]) * multiplier;
+}
+
+function formatReset(value: number, windowId: string, timeZone?: string): string {
+  return formatDate(value, {
+    ...(windowOrder(windowId) >= 24 ? { weekday: "short" as const } : {}),
+    hour: "2-digit",
+    minute: "2-digit",
+  }, timeZone);
+}
+
+function formatClock(value: number, timeZone?: string): string {
+  return formatDate(value, { hour: "2-digit", minute: "2-digit" }, timeZone);
+}
+
+function formatDate(value: number, options: Intl.DateTimeFormatOptions, timeZone?: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", { ...options, hour12: false, ...(timeZone ? { timeZone } : {}) }).format(new Date(value));
+  } catch {
+    return new Intl.DateTimeFormat("en-GB", { ...options, hour12: false, timeZone: "UTC" }).format(new Date(value));
+  }
+}
+
+function existingTaskResultSequence(directory: string | undefined): number {
+  if (!directory) return 0;
+  try {
+    return fs.readdirSync(directory).reduce((maximum, name) => {
+      const sequence = Number(name.match(/^(\d+)-/)?.[1] ?? 0);
+      return Number.isSafeInteger(sequence) ? Math.max(maximum, sequence) : maximum;
+    }, 0);
+  } catch {
+    return 0;
+  }
 }
 
 function limitProjection(value: string): string {
@@ -547,6 +979,41 @@ function formatStageResult(stage: RunningStage, values: unknown[], now: number):
   return lines.join("\n");
 }
 
+function operatorStageOutcome(stage: RunningStage, values: unknown[], now: number): string {
+  const results = values.map(record).filter((item): item is Record<string, unknown> => item !== undefined);
+  if (stage.labels.length === 1) {
+    const result = results[0];
+    const outcome = resultOutcome(result);
+    const duration = result ? nonNegativeNumber(result.durationMs) : undefined;
+    const elapsed = duration ?? Math.max(0, now - stage.startedAt);
+    return `${stage.labels[0]} ${outcome.text} (${formatDuration(elapsed)}).`;
+  }
+  const failed = results.some((result) => resultOutcome(result).kind === "failed");
+  const revision = results.some((result) => resultOutcome(result).kind === "revision");
+  const outcome = failed ? "finished with a failure" : revision ? "finished with requested revisions" : "completed";
+  return `${stage.labels.length} specialist tasks ${outcome}.`;
+}
+
+function nextActionAfterStage(labels: string[]): string {
+  const actions: Record<string, string> = {
+    "Architecture planning": "Run the independent architecture review.",
+    "Architecture review": "Apply only blocking corrections or create the accepted task plan.",
+    "Task plan review": "Begin the first accepted implementation task or correct the bounded task plan.",
+    Implementation: "Validate the task and run its independent implementation review.",
+    "Implementation review": "Advance to the next task or apply the review's blocking correction.",
+    "Integrated code review": "Run final acceptance review after any blocking corrections are closed.",
+    "Acceptance review": "Finalize the run if accepted or create one bounded correction task.",
+    "Source research": "Synthesize the evidence and resolve decision-critical gaps.",
+    "Technical analysis": "Integrate feasibility findings into the recommendation.",
+    "Market and operating-model analysis": "Integrate market and operating-model findings into the recommendation.",
+    "Browser research": "Trace the collected evidence into the decision pack.",
+    "Evidence audit": "Repair material traceability gaps, then finalize the recommendation.",
+    "Recommendation challenge": "Resolve material criticism and finalize the recommendation.",
+  };
+  if (labels.length === 1 && actions[labels[0]]) return actions[labels[0]];
+  return "Synthesize the completed specialist work and continue to the next bounded gate.";
+}
+
 function resultOutcome(result: Record<string, unknown> | undefined): { kind: "passed" | "completed" | "revision" | "failed"; text: string } {
   if (!result || nonNegativeNumber(result.exitCode) !== 0 || result.error) return { kind: "failed", text: "failed" };
   const structured = record(result.structuredOutput);
@@ -595,6 +1062,13 @@ function formatTokens(value: number): string {
 function formatElapsedMinutes(value: number): string {
   const minutes = Math.max(1, Math.floor(value / 60_000));
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+function formatOperatorElapsed(value: number): string {
+  const minutes = Math.max(1, Math.floor(value / 60_000));
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return hours > 0 ? `${hours}h ${remainder}m` : `${minutes}m`;
 }
 
 function formatDuration(value: number): string {

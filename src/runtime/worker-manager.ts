@@ -63,6 +63,13 @@ const WORKFLOW_MIGRATION_PROMPT = [
   "Do not implement, review, validate, commit, or otherwise advance product work until a later user turn.",
 ].join(" ");
 
+const WORKFLOW_RECOVERY_PROMPT = [
+  "Courier restarted while this workflow was active.",
+  "Read the durable run contract, status, ledger, compact continuation packet, and Git state before doing more work.",
+  "Reconcile any partially completed task or review from durable evidence, then continue from the next incomplete gate.",
+  "Do not repeat accepted architecture, tasks, validation, reviews, or commits.",
+].join(" ");
+
 function rotationPrompt(packetPath: string): string {
   return [
     `A previous lead completed an accepted task and Courier rotated the session. Read the compact packet at ${packetPath},`,
@@ -99,7 +106,12 @@ export class WorkerManager {
     return () => this.activityListeners.delete(listener);
   }
 
-  async start(msg: ExternalMessage, profileName: string, workspaceName: string): Promise<ThreadRecord> {
+  async start(
+    msg: ExternalMessage,
+    profileName: string,
+    workspaceName: string,
+    referenceSpecifications: string[] = [],
+  ): Promise<ThreadRecord> {
     const profile = this.profile(profileName);
     const rootEventId = msg.threadRootId ?? msg.messageId;
     const threadKey = makeThreadKey(msg.chatId, rootEventId);
@@ -126,6 +138,10 @@ export class WorkerManager {
     };
     this.store.upsertThread(record);
     if (contract) this.persistWorkflowContract(record, profile, contract);
+    for (const specification of referenceSpecifications) {
+      this.createWorkspaceReference(workspace, specification);
+    }
+    if (referenceSpecifications.length > 0) this.persistReferenceManifest(record, profile);
     await this.ensureWorker(record, profile);
     return this.store.getThread(threadKey)!;
   }
@@ -329,7 +345,7 @@ export class WorkerManager {
     if (worker?.busy && !abort) throw new Error("OMP is busy; wait for idle or attach with --abort");
     if (worker?.busy && abort) await worker.rpc.abort();
     await this.stopWorker(threadKey, "attached", true);
-    await this.runtimes.ensure(this.profile(record.profile), workspace);
+    await this.runtimes.ensure(this.profile(record.profile), workspace, this.store.listWorkspaceReferences(name));
     this.store.acquireOperatorLease(name, `ssh:${process.pid}`);
     this.store.setThreadStatus(threadKey, "attached");
     return { ...(this.store.getThread(threadKey) ?? record), status: "attached" };
@@ -357,7 +373,7 @@ export class WorkerManager {
 
   async environmentStart(name: string): Promise<RuntimeEnvironmentStatus> {
     const target = this.environmentTarget(name);
-    await this.runtimes.ensure(target.profile, target.workspace);
+    await this.runtimes.ensure(target.profile, target.workspace, this.store.listWorkspaceReferences(name));
     return (await this.runtimes.status(target.profile, target.workspace))!;
   }
 
@@ -411,7 +427,69 @@ export class WorkerManager {
 
   async runtimeEnvironment(record: ThreadRecord): Promise<NodeJS.ProcessEnv> {
     const workspace = this.store.getWorkspace(record.workspace);
-    return workspace ? this.runtimes.ensure(this.profile(record.profile), workspace) : {};
+    return workspace
+      ? this.runtimes.ensure(this.profile(record.profile), workspace, this.store.listWorkspaceReferences(record.workspace))
+      : {};
+  }
+
+  async addReference(name: string, specification: string): Promise<import("./state-store.js").WorkspaceReferenceRecord> {
+    const workspace = this.workspaces.resolve(name, false);
+    const record = this.store.getLastThreadForWorkspace(name);
+    if (!record) throw new Error(`Workspace ${name} has no development workflow`);
+    const profile = this.profile(record.profile);
+    if (!profile.workflowContract) throw new Error(`Profile ${record.profile} does not support declared workflow references`);
+    if (workspace.activeThreadKey?.startsWith("ssh:")) throw new Error(`Workspace ${name} is attached over SSH`);
+    if (workspace.activeThreadKey) {
+      const worker = this.workers.get(workspace.activeThreadKey);
+      if (worker?.busy) throw new Error(`Workspace ${name} is busy; wait for a workflow boundary before changing references`);
+      await this.stopWorker(workspace.activeThreadKey);
+    } else {
+      await this.runtimes.stop(profile, workspace);
+    }
+    const reference = this.createWorkspaceReference(workspace, specification);
+    this.persistReferenceManifest(record, profile);
+    return reference;
+  }
+
+  async recoverInterrupted(): Promise<void> {
+    for (const record of this.store.listThreadsWithStatus("interrupted")) {
+      try {
+        if (!record.sessionFile || !fs.existsSync(record.sessionFile)) {
+          throw new Error("the saved OMP session is unavailable");
+        }
+        const profile = this.profile(record.profile);
+        this.assertWorkflowContract(record, profile);
+        this.store.setThreadStatus(record.threadKey, "recovering", record.sessionFile);
+        const worker = await this.ensureWorker(record, profile);
+        worker.record.status = "recovering";
+        this.store.setThreadStatus(record.threadKey, "recovering", record.sessionFile);
+        await this.sendInteractionReply(
+          record,
+          [
+            "⏱️ **Recovery update**",
+            "",
+            "**Finished:** Courier restored the saved OMP session after an interrupted service process.",
+            "**Current:** The lead is reconciling the durable ledger and Git state.",
+            "**Next:** Continue from the next incomplete gate without repeating accepted work.",
+          ].join("\n"),
+        );
+        await worker.rpc.prompt(WORKFLOW_RECOVERY_PROMPT);
+      } catch (error) {
+        await this.stopWorker(record.threadKey, "recovery-failed").catch(() => {});
+        this.store.setThreadStatus(record.threadKey, "recovery-failed", record.sessionFile);
+        await this.sendInteractionReply(
+          record,
+          [
+            "⏱️ **Recovery update**",
+            "",
+            "**Finished:** Courier detected an interrupted run.",
+            "**Current:** Automatic recovery is blocked.",
+            "**Next:** Inspect the workspace status and resume or migrate it explicitly.",
+            `**Action needed:** ${(error as Error).message}`,
+          ].join("\n"),
+        ).catch((sendError) => logger.error(`[courier] recovery notice failed: ${(sendError as Error).message}`));
+      }
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -444,11 +522,16 @@ export class WorkerManager {
       "--tools", profile.tools.join(","),
       ...(profile.model ? ["--model", profile.model] : []),
       ...((profile.configFiles ?? []).flatMap((file) => ["--config", file])),
+      ...(this.store.listWorkspaceReferences(record.workspace).flatMap((reference) => ["--add-dir", reference.hostPath])),
       ...(record.sessionFile ? ["--resume", record.sessionFile] : []),
     ];
     const workspace = this.store.getWorkspace(record.workspace);
     if (!workspace) throw new Error(`Workspace ${record.workspace} is not registered`);
-    const env: NodeJS.ProcessEnv = await this.runtimes.ensure(profile, workspace);
+    const env: NodeJS.ProcessEnv = await this.runtimes.ensure(
+      profile,
+      workspace,
+      this.store.listWorkspaceReferences(record.workspace),
+    );
     if (this.deps.config.authBroker) {
       env.OMP_AUTH_BROKER_URL = this.deps.config.authBroker.url;
       env.OMP_AUTH_BROKER_TOKEN = fs.readFileSync(this.deps.config.authBroker.tokenFile, "utf-8").trim();
@@ -465,11 +548,19 @@ export class WorkerManager {
       readableProgress: reporting?.readableProgress ?? false,
       finalUsage: reporting?.finalUsage ?? false,
       progressHeartbeatSeconds: reporting?.progressHeartbeatSeconds ?? 0,
+      format: reporting?.format ?? "detailed",
+      usageMode: reporting?.usageMode ?? "tokens",
+      capacityStaleSeconds: reporting?.capacityStaleSeconds ?? 900,
+      timeZone: reporting?.timeZone,
+      runLabel: record.profile,
+      authBroker: this.deps.config.authBroker,
+      initialModels: profile.model ? [profile.model] : [],
       statusFilePath: profile.statusFile ? resolveStatusFile(record.workspacePath, profile.statusFile) : undefined,
       workspacePath: record.workspacePath,
       taskResultDirectoryPath: record.workflowContractHash && profile.workflowContract
         ? resolveWithinWorkspace(record.workspacePath, path.join(profile.workflowContract.stateDirectory, "task-results"))
         : undefined,
+      stateFilePath: path.join(record.sessionDir, "run-reporter.json"),
       send: async (text) => {
         this.mirror(() => this.transcripts.appendAssistant(record, text), record.workspace);
         await this.sendInteractionReply(record, text).catch((err) => {
@@ -707,6 +798,36 @@ export class WorkerManager {
     const target = path.join(directory, "run-contract.json");
     const temporary = path.join(directory, `.run-contract-${process.pid}-${randomUUID()}.tmp`);
     fs.writeFileSync(temporary, payload, { mode: 0o600 });
+    fs.renameSync(temporary, target);
+  }
+
+  private createWorkspaceReference(
+    workspace: import("./state-store.js").WorkspaceRecord,
+    specification: string,
+  ): import("./state-store.js").WorkspaceReferenceRecord {
+    const snapshot = this.workspaces.createReferenceSnapshot(
+      workspace,
+      specification,
+      path.join(required(this.deps.config.stateDir, "stateDir"), "references"),
+    );
+    return this.store.upsertWorkspaceReference({ workspace: workspace.name, ...snapshot });
+  }
+
+  private persistReferenceManifest(record: ThreadRecord, profile: OmpProfileConfig): void {
+    const stateDirectory = profile.workflowContract?.stateDirectory ?? ".courier";
+    const directory = resolveWithinWorkspace(record.workspacePath, stateDirectory);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const references = this.store.listWorkspaceReferences(record.workspace).map((reference) => ({
+      name: reference.sourceWorkspace,
+      sourceWorkspace: reference.sourceWorkspace,
+      revision: reference.revision,
+      hostPath: reference.hostPath,
+      guestPath: reference.guestPath,
+      readOnly: true,
+    }));
+    const target = path.join(directory, "references.json");
+    const temporary = path.join(directory, `.references-${process.pid}-${randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, references }, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, target);
   }
 

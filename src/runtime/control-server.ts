@@ -12,6 +12,7 @@ interface ControlRequest {
   confirmation?: string;
   guestPort?: number;
   localPort?: number;
+  reference?: string;
 }
 
 export class ControlServer {
@@ -51,6 +52,7 @@ export class ControlServer {
   private handle(socket: net.Socket): void {
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
+    socket.on("error", () => socket.destroy());
     let buffer = "";
     socket.setEncoding("utf-8");
     socket.on("data", (chunk) => {
@@ -101,6 +103,7 @@ export class ControlServer {
             thread,
             ompCliPath: this.config.ompCliPath,
             profile,
+            references: this.workers.store.listWorkspaceReferences(workspace),
             authBroker: this.config.authBroker,
             runtimeEnvironment: await this.workers.runtimeEnvironment(thread),
           });
@@ -124,13 +127,18 @@ export class ControlServer {
           const workspace = requiredWorkspace(request);
           return this.respond(socket, { ok: true, violations: this.workers.auditArtifacts(workspace) });
         }
+        case "reference-add": {
+          const workspace = requiredWorkspace(request);
+          if (!request.reference) throw new Error("reference is required");
+          return this.respond(socket, { ok: true, reference: await this.workers.addReference(workspace, request.reference) });
+        }
         case "watch": {
           const workspace = requiredWorkspace(request);
           if (!this.workers.store.getWorkspace(workspace)) throw new Error(`Unknown workspace ${workspace}`);
           this.respond(socket, { ok: true, watching: workspace }, false);
           const unsubscribe = this.workers.onActivity((activity) => {
             if (activity.workspace === workspace && !socket.destroyed) {
-              socket.write(`${JSON.stringify({ ok: true, activity })}\n`);
+              this.write(socket, { ok: true, activity }, false);
             }
           });
           socket.once("close", unsubscribe);
@@ -175,8 +183,17 @@ export class ControlServer {
   }
 
   private respond(socket: net.Socket, response: Record<string, unknown>, close = true): void {
-    socket.write(`${JSON.stringify(response)}\n`, () => {
-      if (close) socket.end();
+    this.write(socket, response, close);
+  }
+
+  private write(socket: net.Socket, response: Record<string, unknown>, close: boolean): void {
+    if (socket.destroyed || !socket.writable) return;
+    socket.write(`${JSON.stringify(response)}\n`, (error) => {
+      if (error) {
+        socket.destroy();
+        return;
+      }
+      if (close && !socket.destroyed) socket.end();
     });
   }
 }

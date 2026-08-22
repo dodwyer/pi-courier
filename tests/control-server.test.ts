@@ -64,6 +64,37 @@ describe("ControlServer", () => {
     expect(resumeWorkspace).toHaveBeenCalledWith("research", "Continue from the accepted task plan.");
     await server.stop();
   });
+
+  it("survives an abrupt watch-client reset and continues serving requests", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-control-reset-test-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "control.sock");
+    const unsubscribe = vi.fn();
+    const workers = {
+      store: {
+        getWorkspace: () => ({ name: "research" }),
+        listWorkspaces: () => [{ name: "research" }],
+        listThreads: () => [],
+      },
+      onActivity: () => unsubscribe,
+    } as unknown as WorkerManager;
+    const server = new ControlServer({ controlSocket: socketPath } as MsgBridgeConfig, workers);
+    await server.start();
+    const client = net.createConnection(socketPath);
+    await new Promise<void>((resolve, reject) => {
+      client.once("connect", resolve);
+      client.once("error", reject);
+    });
+    client.write(`${JSON.stringify({ command: "watch", workspace: "research" })}\n`);
+    await new Promise<void>((resolve) => client.once("data", () => resolve()));
+    const accepted = [...(server as unknown as { sockets: Set<net.Socket> }).sockets][0];
+    accepted.emit("error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await expect(socketRequest(socketPath, { command: "list" })).resolves.toMatchObject({ ok: true });
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    await server.stop();
+  });
 });
 
 async function socketRequest(socketPath: string, request: Record<string, unknown>): Promise<Record<string, unknown>> {

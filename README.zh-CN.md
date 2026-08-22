@@ -57,7 +57,7 @@ OMP 以所选工作区作为当前目录运行，因此报告、代码和其他�
 
 镜像包含带时间戳的 Matrix 用户文本、OMP 助手文本和 Courier 运行更新，不记录隐藏推理、原始工具结果、工具参数、交互输入或审批 payload。主动粘贴到对话中的文字仍可能包含敏感信息。Courier 状态目录中的受保护 OMP JSONL 会话仍是恢复会话和原生 TUI attach 的权威数据源。
 
-Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更新和按模型统计的 token 报告。运行中的子代理使用 OMP 的实时 token 计数并标记为 `~`；task 结束后，会用精确的输入、输出、缓存读取和缓存写入总数替换估算值。设置 `hideToolCalls` 可避免在普通 Matrix 回复中显示原始工具名称和参数；需要协议级输出的运维人员仍可使用 `courierctl watch --raw`。
+Courier 还可以把 OMP 活动转换为精简的运维视图，只显示 Finished、Current、Next 和可选的 Action needed。Operator 模式会在配置的间隔内至少发送一次更新；有意义的即时更新会重置计时，并可从 OMP 认证代理读取订阅容量剩余百分比，而不是根据 token 数量估算。旧的详细 token 视图仍然可用。设置 `hideToolCalls` 可避免在普通 Matrix 回复中显示原始工具名称和参数；需要协议级输出的运维人员仍可使用 `courierctl watch --raw`。
 
 启用 workflow contract 的 profile 会在运行开始时记录确定性的 schema-v2 身份，包括 profile 配置、prompt bundle、精确的角色/模型映射、runtime 镜像和工具链。身份变化会在产品工作开始前阻止恢复；`!migrate` 会启动新的 lead 会话，并只执行 ledger 对账。没有历史 contract 的旧运行仍可恢复。Courier 会机械地持久化 task envelope，并可在已接受任务边界消费原子 rotation packet，从而无需额外的“持久化”模型任务。
 
@@ -84,9 +84,13 @@ Courier 还可以把 OMP 原生 task 事件转换成简短的 Matrix 阶段更�
   "hideToolCalls": true,
   "runReporting": {
     "intervalSeconds": 600,
-    "progressHeartbeatSeconds": 60,
+    "progressHeartbeatSeconds": 0,
     "readableProgress": true,
-    "finalUsage": true
+    "finalUsage": true,
+    "format": "operator",
+    "usageMode": "capacity",
+    "capacityStaleSeconds": 900,
+    "timeZone": "Europe/Berlin"
   },
   "runtimes": {
     "development-vm": {
@@ -140,6 +144,7 @@ courierctl watch nomadmade --raw
 courierctl resume nomadmade "Continue from the current recorded gate."
 courierctl migrate nomadmade
 courierctl artifacts nomadmade
+courierctl reference add nomadmade rust-tams-api@58c73d8
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
@@ -159,7 +164,9 @@ courierctl env tunnel-command nomadmade 8080 18080
 
 `env shell` 会启动工作区虚拟机供运维人员使用，并在 shell 退出后停止它。重建和销毁必须用工作区名称显式确认，两者都会保留主机上的工作区文件。`tunnel-command` 只为正在运行的虚拟机打印 SSH 本地转发命令，不会自行打开监听端口。
 
-当 profile 启用 `matrixUpdatesFromStatus` 时，Courier 会投影工作区内的 `statusFile`，而不是转发 lead agent 的原始回合文本。优先使用精简的 `## Matrix update` 项目符号块，并在下一个标题或空行块边界处结束；旧文件则退回显示 `Status`、`Current gate` 和 `Updated` 字段。工作区外的文件、非普通文件以及大于 256 KiB 的文件都会被忽略。相同的投影也会显示在定期的按模型用量报告中；如果内容没有变化，Courier 只发送一行 heartbeat，不再重复整段状态。长时间运行的委派阶段可发送独立且有界的进度 heartbeat。令牌总数采用提供商报告的处理量，并细分为输入、缓存读取/写入和输出，以便看清长上下文的缓存活动。
+当 profile 启用 `matrixUpdatesFromStatus` 时，Courier 会投影工作区内的 `statusFile`，而不是转发 lead agent 的原始回合文本。Operator 格式要求 `## Matrix update` 中包含 `Finished:`、`Current:` 和 `Next:`，仅在需要人工干预时包含 `Action needed:`。工作区外的文件、非普通文件以及大于 256 KiB 的文件都会被忽略。即时状态更新会重置定期计时，既避免连续重复消息，也保证运行静默时间不超过配置间隔。Capacity 模式仅显示认证代理返回的相关提供商/模型窗口；超过 `capacityStaleSeconds` 会标记为过期，绝不会用 token 数推算替代。
+
+可以在启动时用 `--reference <workspace>@<commit>` 声明精确的本地 Git 提交，也可以在目标空闲时运行 `courierctl reference add`。Courier 会把该提交导出到状态缓存，通过 `--add-dir` 提供给主机 OMP，在隔离 VM 的 `/references/...` 路径只读挂载，并把来源记录到工作流的 `references.json`。
 
 ## 隔离的 E2E canary
 

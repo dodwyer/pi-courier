@@ -6,6 +6,7 @@ import type { ExternalWorkspaceConfig } from "../types.js";
 import type { StateStore, WorkspaceRecord } from "./state-store.js";
 
 const WORKSPACE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const GIT_REVISION = /^[a-f0-9]{7,40}$/i;
 const MAX_BRIEF_BYTES = 256 * 1024;
 
 export interface BriefHandoff {
@@ -13,6 +14,13 @@ export interface BriefHandoff {
   sourceWorkspace: string;
   sourcePath: string;
   sourceSha256: string;
+}
+
+export interface WorkspaceReferenceSnapshot {
+  sourceWorkspace: string;
+  revision: string;
+  hostPath: string;
+  guestPath: string;
 }
 
 export class WorkspaceManager {
@@ -119,6 +127,62 @@ export class WorkspaceManager {
     }
     fs.rmSync(expectedPath, { recursive: true, force: true });
     this.store.deleteWorkspace(workspace.name);
+  }
+
+  createReferenceSnapshot(
+    target: WorkspaceRecord,
+    specification: string,
+    cacheRoot: string,
+  ): WorkspaceReferenceSnapshot {
+    if (target.kind !== "managed") throw new Error("References can only be attached to managed workspaces");
+    const separator = specification.lastIndexOf("@");
+    if (separator <= 0 || separator === specification.length - 1) {
+      throw new Error("Reference must be <managed-workspace>@<git-commit>");
+    }
+    const sourceName = specification.slice(0, separator);
+    const requestedRevision = specification.slice(separator + 1);
+    validateWorkspaceName(sourceName);
+    if (!GIT_REVISION.test(requestedRevision)) throw new Error("Reference revision must be a 7-40 character Git commit ID");
+    if (sourceName === target.name) throw new Error("A workspace cannot reference itself");
+    const source = this.resolve(sourceName, false);
+    if (source.kind !== "managed" || !fs.existsSync(path.join(source.path, ".git"))) {
+      throw new Error(`Reference source ${sourceName} must be a managed Git workspace`);
+    }
+    const gitArgs = ["-c", `safe.directory=${source.path}`];
+    let revision: string;
+    try {
+      revision = execFileSync("git", [...gitArgs, "rev-parse", "--verify", `${requestedRevision}^{commit}`], {
+        cwd: source.path,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    } catch {
+      throw new Error(`Reference ${sourceName}@${requestedRevision} is not available locally`);
+    }
+    const targetRoot = path.resolve(cacheRoot, target.name);
+    const hostPath = path.join(targetRoot, `${sourceName}-${revision}`);
+    const guestPath = `/references/${sourceName}-${revision.slice(0, 12)}`;
+    if (!fs.existsSync(hostPath)) {
+      fs.mkdirSync(targetRoot, { recursive: true, mode: 0o755 });
+      const temporary = path.join(targetRoot, `.snapshot-${sourceName}-${process.pid}-${Date.now()}`);
+      const archive = `${temporary}.tar`;
+      try {
+        fs.mkdirSync(temporary, { mode: 0o700 });
+        execFileSync("git", [...gitArgs, "archive", "--format=tar", `--output=${archive}`, revision], {
+          cwd: source.path,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        execFileSync("tar", ["-xf", archive, "-C", temporary]);
+        makeReferenceReadOnly(temporary);
+        fs.renameSync(temporary, hostPath);
+      } catch (error) {
+        fs.rmSync(temporary, { recursive: true, force: true });
+        throw new Error(`Could not create immutable reference ${sourceName}@${revision.slice(0, 12)}: ${(error as Error).message}`);
+      } finally {
+        fs.rmSync(archive, { force: true });
+      }
+    }
+    return { sourceWorkspace: sourceName, revision, hostPath, guestPath };
   }
 
   private resolveExternal(name: string): WorkspaceRecord {
@@ -243,4 +307,26 @@ function ensureLocalGitExclude(workspacePath: string): void {
   const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : "";
   if (existing.split(/\r?\n/).includes(".courier/")) return;
   fs.appendFileSync(excludePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}.courier/\n`, { mode: 0o600 });
+}
+
+function makeReferenceReadOnly(root: string): void {
+  const visit = (target: string): void => {
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink()) {
+      const link = fs.readlinkSync(target);
+      const resolved = path.resolve(path.dirname(target), link);
+      const relative = path.relative(root, resolved);
+      if (path.isAbsolute(link) || relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error(`reference contains an escaping symbolic link at ${path.relative(root, target)}`);
+      }
+      return;
+    }
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(target)) visit(path.join(target, entry));
+      fs.chmodSync(target, 0o555);
+      return;
+    }
+    if (stat.isFile()) fs.chmodSync(target, stat.mode & 0o111 ? 0o555 : 0o444);
+  };
+  visit(root);
 }

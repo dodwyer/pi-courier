@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import type { LxdVmRuntimeConfig, MsgBridgeConfig, OmpProfileConfig } from "../types.js";
-import type { WorkspaceRecord } from "./state-store.js";
+import type { WorkspaceRecord, WorkspaceReferenceRecord } from "./state-store.js";
 
 function execFileClosedStdin(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -30,6 +30,7 @@ interface LxdInstance {
   status?: string;
   status_code?: number;
   config?: Record<string, string>;
+  devices?: Record<string, Record<string, string>>;
   state?: {
     network?: Record<string, { addresses?: Array<{ family?: string; address?: string; scope?: string }> }>;
   };
@@ -54,7 +55,11 @@ export interface RuntimeShellCommand {
 export class LxdRuntimeManager {
   constructor(private readonly config: MsgBridgeConfig) {}
 
-  async ensure(profile: OmpProfileConfig, workspace: WorkspaceRecord): Promise<NodeJS.ProcessEnv> {
+  async ensure(
+    profile: OmpProfileConfig,
+    workspace: WorkspaceRecord,
+    references: WorkspaceReferenceRecord[] = [],
+  ): Promise<NodeJS.ProcessEnv> {
     const resolved = this.resolveProfileRuntime(profile, workspace);
     if (!resolved) return {};
     const { name, runtime } = resolved;
@@ -89,6 +94,7 @@ export class LxdRuntimeManager {
       }
       current = { name: instance, status: "Stopped" };
     }
+    await this.syncReferenceDevices(runtime, instance, references);
     if (!isRunning(current)) {
       const running = instances.filter(isRunning).length;
       if (running >= (runtime.maxRunning ?? 3)) {
@@ -204,6 +210,48 @@ export class LxdRuntimeManager {
     const parsed = JSON.parse(result.stdout || "[]") as unknown;
     if (!Array.isArray(parsed)) throw new Error(`LXD returned invalid instance inventory for project ${runtime.project}`);
     return parsed as LxdInstance[];
+  }
+
+  private async syncReferenceDevices(
+    runtime: LxdVmRuntimeConfig,
+    instance: string,
+    references: WorkspaceReferenceRecord[],
+  ): Promise<void> {
+    if (references.length === 0) return;
+    const shown = await this.run(runtime, [
+      "config", "show", `${runtime.remote}:${instance}`,
+      "--project", runtime.project,
+      "--format", "json",
+    ]);
+    const config = JSON.parse(shown.stdout || "{}") as LxdInstance;
+    for (const reference of references) {
+      const device = `reference-${createHash("sha256")
+        .update(reference.sourceWorkspace)
+        .digest("hex")
+        .slice(0, 12)}`;
+      const existing = config.devices?.[device];
+      if (existing) {
+        if (
+          existing.source !== reference.hostPath
+          || existing.path !== reference.guestPath
+          || existing.readonly !== "true"
+        ) {
+          await this.run(runtime, [
+            "config", "device", "remove", `${runtime.remote}:${instance}`, device,
+            "--project", runtime.project,
+          ]);
+        } else {
+          continue;
+        }
+      }
+      await this.run(runtime, [
+        "config", "device", "add", `${runtime.remote}:${instance}`, device, "disk",
+        `source=${reference.hostPath}`,
+        `path=${reference.guestPath}`,
+        "readonly=true",
+        "--project", runtime.project,
+      ]);
+    }
   }
 
   private async waitReady(runtime: LxdVmRuntimeConfig, instance: string): Promise<void> {

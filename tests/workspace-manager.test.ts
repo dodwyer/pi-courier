@@ -105,6 +105,25 @@ describe("WorkspaceManager", () => {
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: handoff.workspace.path, encoding: "utf-8" })).toBe("");
   });
 
+  it("exports an exact managed-workspace commit as an immutable reference", () => {
+    const manager = new WorkspaceManager(root, {}, store);
+    const source = manager.resolve("source-project");
+    writeFileSync(join(source.path, "contract.txt"), "version one\n");
+    execFileSync("git", ["add", "contract.txt"], { cwd: source.path });
+    execFileSync("git", ["commit", "-m", "Add contract"], { cwd: source.path });
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source.path, encoding: "utf-8" }).trim();
+    const target = manager.resolve("target-project");
+
+    const snapshot = manager.createReferenceSnapshot(target, `source-project@${revision.slice(0, 12)}`, join(state, "references"));
+
+    expect(snapshot.revision).toBe(revision);
+    expect(snapshot.guestPath).toBe(`/references/source-project-${revision.slice(0, 12)}`);
+    expect(readFileSync(join(snapshot.hostPath, "contract.txt"), "utf-8")).toBe("version one\n");
+    expect(statSync(join(snapshot.hostPath, "contract.txt")).mode & 0o222).toBe(0);
+    expect(() => manager.createReferenceSnapshot(target, "source-project@deadbee", join(state, "references")))
+      .toThrow(/not available locally/);
+  });
+
   it("rejects unsafe or oversized brief references without creating a target", () => {
     const manager = new WorkspaceManager(root, {}, store);
     const source = manager.resolve("research-source");

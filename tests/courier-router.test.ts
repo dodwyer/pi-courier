@@ -43,6 +43,25 @@ describe("CourierRouter", () => {
     expect(replies[0]).toContain("Usage: !start development");
   });
 
+  it("passes declared references into a new development run", async () => {
+    const start = vi.fn(async () => ({
+      profile: "development",
+      workspacePath: "/srv/threads/build-tool",
+      rootEventId: "$root",
+    }));
+    const prompt = vi.fn(async () => {});
+    const router = new CourierRouter({
+      config: config(),
+      workers: { start, prompt } as unknown as WorkerManager,
+      reply: async () => {},
+    });
+
+    await router.handle(message("!start development build-tool --reference rust-tams-api@58c73d8 build the API"));
+
+    expect(start).toHaveBeenCalledWith(expect.anything(), "development", "build-tool", ["rust-tams-api@58c73d8"]);
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ threadRootId: "$root" }), "build the API");
+  });
+
   it("routes explicit selection, text, multiline editor, and cancellation responses", async () => {
     const resolveSelection = vi.fn(async () => "second option");
     const resolveTextInput = vi.fn(async () => {});

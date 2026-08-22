@@ -30,6 +30,15 @@ export interface WorkspaceRecord {
   updatedAt: number;
 }
 
+export interface WorkspaceReferenceRecord {
+  workspace: string;
+  sourceWorkspace: string;
+  revision: string;
+  hostPath: string;
+  guestPath: string;
+  createdAt: number;
+}
+
 export class StateStore {
   private readonly db: DatabaseSync;
 
@@ -61,13 +70,25 @@ export class StateStore {
         last_activity INTEGER NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS threads_room_root ON threads(room_id, root_event_id);
+      CREATE TABLE IF NOT EXISTS workspace_references (
+        workspace TEXT NOT NULL,
+        source_workspace TEXT NOT NULL,
+        revision TEXT NOT NULL,
+        host_path TEXT NOT NULL,
+        guest_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace, source_workspace)
+      );
     `);
     this.ensureColumn("threads", "workflow_contract_hash", "TEXT");
     this.ensureColumn("threads", "workflow_contract_json", "TEXT");
-    // A process restart terminates every child, so no persisted lease remains active.
+    // A process restart terminates every child, so no persisted lease remains
+    // active. Preserve active work as interrupted so WorkerManager can resume
+    // its saved session after Matrix is connected.
     this.db.exec(`
       UPDATE workspaces SET active_thread_key = NULL;
-      UPDATE threads SET status = 'stopped' WHERE status != 'stopped';
+      UPDATE threads SET status = 'interrupted' WHERE status IN ('starting', 'busy', 'recovering');
+      UPDATE threads SET status = 'stopped' WHERE status IN ('idle', 'migrating');
       UPDATE workspaces
       SET last_thread_key = (
         SELECT thread_key FROM threads
@@ -193,6 +214,39 @@ export class StateStore {
   listThreads(): ThreadRecord[] {
     const rows = this.db.prepare("SELECT * FROM threads ORDER BY last_activity DESC").all() as Record<string, unknown>[];
     return rows.map(threadFromRow);
+  }
+
+  listThreadsWithStatus(status: string): ThreadRecord[] {
+    const rows = this.db.prepare("SELECT * FROM threads WHERE status = ? ORDER BY last_activity ASC")
+      .all(status) as Record<string, unknown>[];
+    return rows.map(threadFromRow);
+  }
+
+  upsertWorkspaceReference(record: Omit<WorkspaceReferenceRecord, "createdAt">): WorkspaceReferenceRecord {
+    const createdAt = Date.now();
+    this.db.prepare(`
+      INSERT INTO workspace_references(workspace, source_workspace, revision, host_path, guest_path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace, source_workspace) DO UPDATE SET
+        revision=excluded.revision,
+        host_path=excluded.host_path,
+        guest_path=excluded.guest_path,
+        created_at=excluded.created_at
+    `).run(record.workspace, record.sourceWorkspace, record.revision, record.hostPath, record.guestPath, createdAt);
+    return { ...record, createdAt };
+  }
+
+  listWorkspaceReferences(workspace: string): WorkspaceReferenceRecord[] {
+    const rows = this.db.prepare("SELECT * FROM workspace_references WHERE workspace = ? ORDER BY source_workspace")
+      .all(workspace) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      workspace: String(row.workspace),
+      sourceWorkspace: String(row.source_workspace),
+      revision: String(row.revision),
+      hostPath: String(row.host_path),
+      guestPath: String(row.guest_path),
+      createdAt: Number(row.created_at),
+    }));
   }
 
   deleteThread(threadKey: string): void {

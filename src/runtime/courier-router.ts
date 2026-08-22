@@ -25,23 +25,23 @@ export class CourierRouter {
         await this.withError(msg, async () => {
           if (parts.length < 2) throw new Error("Usage: !start <profile> <workspace> [initial prompt]");
           const [profile, workspace, ...promptParts] = parts;
-          const briefIndex = promptParts.indexOf("--brief");
-          if (briefIndex >= 0) {
-            if (briefIndex !== 0 || promptParts.length !== 2) {
+          const parsed = parseStartOptions(promptParts);
+          if (parsed.brief) {
+            if (parsed.references.length > 0 || parsed.prompt.length > 0) {
               throw new Error("Usage: !start development <workspace> --brief <source-workspace>/development-briefs/<brief>.md");
             }
-            const record = await this.deps.workers.startFromBrief(msg, profile, workspace, promptParts[1]);
+            const record = await this.deps.workers.startFromBrief(msg, profile, workspace, parsed.brief);
             await this.reply(
               msg,
-              `✅ Started **${record.profile}** in \`${record.workspacePath}\` from approved brief \`${promptParts[1]}\`.`,
+              `✅ Started **${record.profile}** in \`${record.workspacePath}\` from approved brief \`${parsed.brief}\`.`,
               record.rootEventId,
             );
           } else {
-            const record = await this.deps.workers.start(msg, profile, workspace);
+            const record = await this.deps.workers.start(msg, profile, workspace, parsed.references);
             await this.reply(msg, `✅ Started **${record.profile}** in \`${record.workspacePath}\`.`, record.rootEventId);
-            if (promptParts.length === 0) return;
+            if (parsed.prompt.length === 0) return;
             const threaded = { ...msg, threadRootId: record.rootEventId };
-            await this.deps.workers.prompt(threaded, promptParts.join(" "));
+            await this.deps.workers.prompt(threaded, parsed.prompt.join(" "));
           }
         });
         return;
@@ -167,6 +167,7 @@ function helpText(): string {
   return [
     "**OMP Courier commands**",
     "• `!start <profile> <workspace> [prompt]`",
+    "• `!start <profile> <workspace> [--reference <workspace>@<commit>]… [prompt]`",
     "• `!start development <workspace> --brief <source-workspace>/development-briefs/<brief>.md`",
     "• `!continue <workspace>`",
     "• `!new [profile]`",
@@ -178,6 +179,31 @@ function helpText(): string {
     "",
     "Dynamic workspaces are created under the configured workspace root. Existing repositories use `repo:<name>`.",
   ].join("\n");
+}
+
+function parseStartOptions(parts: string[]): { brief?: string; references: string[]; prompt: string[] } {
+  const references: string[] = [];
+  let index = 0;
+  let brief: string | undefined;
+  while (index < parts.length) {
+    if (parts[index] === "--reference") {
+      if (!parts[index + 1]) throw new Error("--reference requires <workspace>@<git-commit>");
+      references.push(parts[index + 1]);
+      index += 2;
+      continue;
+    }
+    if (parts[index] === "--brief") {
+      if (!parts[index + 1]) throw new Error("--brief requires a development brief path");
+      brief = parts[index + 1];
+      index += 2;
+    }
+    break;
+  }
+  const prompt = parts.slice(index);
+  if (prompt.includes("--brief") || prompt.includes("--reference")) {
+    throw new Error("Usage: !start development <workspace> --brief <source-workspace>/development-briefs/<brief>.md; start options must precede the prompt");
+  }
+  return { brief, references, prompt };
 }
 
 function parseAnswer(content: string): { shortId: string; value: string } {

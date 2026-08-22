@@ -1,10 +1,10 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LxdRuntimeManager, runtimeInstanceName } from "../src/runtime/lxd-runtime";
 import type { MsgBridgeConfig, OmpProfileConfig } from "../src/types";
-import type { WorkspaceRecord } from "../src/runtime/state-store";
+import type { WorkspaceRecord, WorkspaceReferenceRecord } from "../src/runtime/state-store";
 
 describe("LxdRuntimeManager", () => {
   const dirs: string[] = [];
@@ -56,6 +56,29 @@ describe("LxdRuntimeManager", () => {
       .resolves.toContain("developer@10.251.0.42");
   });
 
+  it("mounts declared immutable references read-only before starting the VM", async () => {
+    const fixture = runtimeFixture(dirs);
+    const hostPath = join(fixture.workspace.path, "..", "reference-cache");
+    mkdirSync(hostPath, { recursive: true });
+    const reference: WorkspaceReferenceRecord = {
+      workspace: fixture.workspace.name,
+      sourceWorkspace: "rust-tams-api",
+      revision: "a".repeat(40),
+      hostPath,
+      guestPath: "/references/rust-tams-api-aaaaaaaaaaaa",
+      createdAt: Date.now(),
+    };
+
+    await fixture.manager.ensure(fixture.profile, fixture.workspace, [reference]);
+
+    const instances = JSON.parse(readFileSync(fixture.state, "utf-8"));
+    const referenceDevice = Object.values(instances[0].devices as Record<string, Record<string, string>>)
+      .find((device) => device.path === reference.guestPath);
+    expect(referenceDevice).toMatchObject({ source: hostPath, readonly: "true", type: "disk" });
+    const commands = readFileSync(fixture.log, "utf-8");
+    expect(commands.indexOf(reference.guestPath)).toBeLessThan(commands.indexOf('"start"'));
+  });
+
   it("rejects isolated runtimes for declared external workspaces", async () => {
     const fixture = runtimeFixture(dirs);
     await expect(fixture.manager.ensure(fixture.profile, { ...fixture.workspace, kind: "external" }))
@@ -90,7 +113,21 @@ const name = target ? target.slice(5) : undefined;
 if (args[0] === "list") {
   process.stdout.write(JSON.stringify(instances));
 } else if (args[0] === "init") {
-  instances.push({name, status:"Stopped", status_code:102, config:{}});
+  instances.push({name, status:"Stopped", status_code:102, config:{}, devices:{}});
+} else if (args[0] === "config" && args[1] === "show") {
+  process.stdout.write(JSON.stringify(instances.find(value => value.name === name)));
+} else if (args[0] === "config" && args[1] === "device" && args[2] === "add") {
+  const instance = instances.find(value => value.name === name);
+  const device = {type: args[5]};
+  for (const pair of args.slice(6)) {
+    if (pair === "--project" || pair === "omp-development") continue;
+    const separator = pair.indexOf("=");
+    if (separator > 0) device[pair.slice(0, separator)] = pair.slice(separator + 1);
+  }
+  instance.devices[args[4]] = device;
+} else if (args[0] === "config" && args[1] === "device" && args[2] === "remove") {
+  const instance = instances.find(value => value.name === name);
+  delete instance.devices[args[4]];
 } else if (args[0] === "config" && args[1] === "set") {
   const instance = instances.find(value => value.name === name);
   for (const pair of args.slice(3)) {

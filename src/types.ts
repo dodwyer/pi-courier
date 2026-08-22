@@ -118,6 +118,14 @@ export interface RunReportingConfig {
   finalUsage?: boolean;
   /** Emit a concise heartbeat for a still-running delegated stage at this cadence. */
   progressHeartbeatSeconds?: number;
+  /** Detailed legacy telemetry or the compact Finished/Current/Next operator view. */
+  format?: "detailed" | "operator";
+  /** Show raw token telemetry, subscription capacity remaining, or no usage information. */
+  usageMode?: "tokens" | "capacity" | "none";
+  /** Age after which a cached broker capacity reading is explicitly marked stale. */
+  capacityStaleSeconds?: number;
+  /** IANA timezone used for compact capacity reset timestamps. */
+  timeZone?: string;
 }
 
 /**

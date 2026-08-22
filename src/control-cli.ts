@@ -60,6 +60,15 @@ async function main(): Promise<void> {
     await environmentCommand(workspace, rest);
     return;
   }
+  if (command === "reference") {
+    if (workspace !== "add" || rest.length !== 2) {
+      throw new Error("Usage: courierctl reference add <workspace> <source-workspace>@<git-commit>");
+    }
+    const [target, reference] = rest;
+    const [response] = await request({ command: "reference-add", workspace: target, reference });
+    console.log(JSON.stringify(response.reference, null, 2));
+    return;
+  }
   switch (command) {
     case "list": {
       const [response] = await request({ command: "list" });
@@ -120,6 +129,7 @@ async function attach(workspace: string | undefined, abort: boolean): Promise<vo
   const [response] = await request({ command: "lease", workspace, abort });
   const thread = response.thread as Record<string, unknown>;
   const profile = response.profile as { tools?: string[]; approvalMode?: string; model?: string; configFiles?: string[] } | undefined;
+  const references = response.references as Array<{ hostPath?: string }> | undefined;
   const cliPath = String(response.ompCliPath ?? "omp");
   const args = [
     "--profile", String(thread.profile),
@@ -130,6 +140,7 @@ async function attach(workspace: string | undefined, abort: boolean): Promise<vo
     ...(profile?.tools?.length ? ["--tools", profile.tools.join(",")] : []),
     ...(profile?.model ? ["--model", profile.model] : []),
     ...((profile?.configFiles ?? []).flatMap((file) => ["--config", file])),
+    ...((references ?? []).flatMap((reference) => reference.hostPath ? ["--add-dir", reference.hostPath] : [])),
   ];
   const env = { ...process.env };
   const runtimeEnvironment = response.runtimeEnvironment as Record<string, string> | undefined;
@@ -226,6 +237,7 @@ function usage(): void {
     "  courierctl list | status <workspace> | watch <workspace> [--raw]",
     "  courierctl resume <workspace> <message...> | attach <workspace> [--abort] | adopt <workspace>",
     "  courierctl migrate <workspace> | artifacts <workspace>",
+    "  courierctl reference add <workspace> <source-workspace>@<git-commit>",
     "  courierctl env list",
     "  courierctl env status|start|shell|stop <workspace>",
     "  courierctl env rebuild|destroy <workspace> --confirm <workspace>",

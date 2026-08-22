@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerManager } from "../src/runtime/worker-manager";
+import { StateStore } from "../src/runtime/state-store";
 import type { ExternalMessage, MsgBridgeConfig } from "../src/types";
+import { WorkspaceManager } from "../src/runtime/workspace-manager";
 
 describe("WorkerManager", () => {
   const dirs: string[] = [];
@@ -140,6 +142,78 @@ rl.on("line", line => {
     expect(manager.store.getWorkspace("failed-build")).toBeUndefined();
     expect(manager.store.getThread("failed-room\u001f$failed-root")).toBeUndefined();
     expect(readdirSync(join(dir, "state", "sessions"))).toEqual([]);
+    await manager.shutdown();
+  });
+
+  it("recovers an interrupted Matrix run once from its saved session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-worker-recovery-test-"));
+    dirs.push(dir);
+    const stateDir = join(dir, "state");
+    const workspaceRoot = join(dir, "threads");
+    const sessionDir = join(stateDir, "sessions", "recovery");
+    mkdirSync(sessionDir, { recursive: true });
+    const sessionFile = join(sessionDir, "session.jsonl");
+    writeFileSync(sessionFile, "{}\n");
+    const bootstrap = new StateStore(stateDir);
+    const workspace = new WorkspaceManager(workspaceRoot, {}, bootstrap).resolve("recovery-project");
+    bootstrap.upsertThread({
+      threadKey: "recovery-room\u001frecovery-root",
+      roomId: "recovery-room",
+      rootEventId: "recovery-root",
+      transport: "matrix",
+      username: "david",
+      workspace: workspace.name,
+      workspacePath: workspace.path,
+      profile: "development",
+      sessionDir,
+      sessionFile,
+      status: "busy",
+      lastActivity: Date.now(),
+    });
+    bootstrap.acquireWorkspace(workspace.name, "recovery-room\u001frecovery-root");
+    bootstrap.close();
+
+    const promptLog = join(dir, "prompts.log");
+    const fakeOmp = join(dir, "omp");
+    writeFileSync(fakeOmp, `#!/usr/bin/env node
+const fs = require("node:fs");
+const readline = require("node:readline");
+process.stdout.write(JSON.stringify({type:"ready"}) + "\\n");
+const rl = readline.createInterface({input: process.stdin});
+rl.on("line", line => {
+  const frame = JSON.parse(line);
+  if (frame.type === "get_state") {
+    process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{sessionId:"recovered",sessionFile:${JSON.stringify(sessionFile)}}})+"\\n");
+  } else if (frame.type === "prompt") {
+    fs.appendFileSync(${JSON.stringify(promptLog)}, frame.message + "\\n");
+    process.stdout.write(JSON.stringify({type:"response",id:frame.id,command:frame.type,success:true,data:{agentInvoked:true}})+"\\n");
+    process.stdout.write(JSON.stringify({type:"agent_start"})+"\\n");
+    process.stdout.write(JSON.stringify({type:"agent_end"})+"\\n");
+  }
+});
+`, { mode: 0o755 });
+    chmodSync(fakeOmp, 0o755);
+    const replies: string[] = [];
+    const manager = new WorkerManager({
+      config: {
+        workspaceRoot,
+        stateDir,
+        ompCliPath: fakeOmp,
+        profiles: { development: { tools: ["read"], approvalMode: "write" } },
+        externalWorkspaces: {},
+      },
+      sendReply: async (_record, text) => { replies.push(text); },
+      sendTyping: async () => {},
+    });
+    expect(manager.store.getThread("recovery-room\u001frecovery-root")?.status).toBe("interrupted");
+
+    await manager.recoverInterrupted();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await manager.recoverInterrupted();
+
+    expect(replies.filter((text) => text.includes("Courier restored the saved OMP session"))).toHaveLength(1);
+    expect(readFileSync(promptLog, "utf-8")).toContain("Do not repeat accepted architecture");
+    expect(manager.store.getThread("recovery-room\u001frecovery-root")?.status).toBe("idle");
     await manager.shutdown();
   });
 

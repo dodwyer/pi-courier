@@ -63,12 +63,14 @@ OMP runs with the selected workspace as its current directory, so requested repo
 
 The mirror contains Matrix user text, OMP assistant text, and Courier run updates with timestamps. It deliberately excludes hidden reasoning, raw tool results, tool arguments, and interactive-input or approval payloads. Text deliberately pasted into the conversation may still be sensitive. Protected OMP session JSONL under Courier's state directory remains authoritative for resume and native TUI attach.
 
-Courier can also turn native OMP task events into short Matrix stage updates and
-per-model token reports. Live subagent totals use OMP's running token counter
-and are marked `~`; exact input, output, cache-read, and cache-write totals
-replace them when the task settles. Set `hideToolCalls` to keep raw tool names
-and arguments out of normal Matrix replies; `courierctl watch --raw` remains
-available to an operator who needs protocol-level output.
+Courier can also turn native OMP activity into a lean operator view containing
+Finished, Current, Next, and optional Action needed fields. Operator mode sends
+at least one update every configured interval, resets that deadline after a
+meaningful update, and can obtain subscription capacity remaining from the OMP
+authentication broker instead of estimating it from token counts. The legacy
+detailed token view remains available. Set `hideToolCalls` to keep raw tool
+names and arguments out of normal Matrix replies; `courierctl watch --raw`
+remains available to an operator who needs protocol-level output.
 
 Contracted workflows capture a deterministic schema-v2 identity for the
 profile configuration, prompt bundle, exact role/model map, runtime image, and
@@ -106,9 +108,13 @@ Set `PI_COURIER_CONFIG` to a root-owned JSON file. Secrets should be referenced 
   "hideToolCalls": true,
   "runReporting": {
     "intervalSeconds": 600,
-    "progressHeartbeatSeconds": 60,
+    "progressHeartbeatSeconds": 0,
     "readableProgress": true,
-    "finalUsage": true
+    "finalUsage": true,
+    "format": "operator",
+    "usageMode": "capacity",
+    "capacityStaleSeconds": 900,
+    "timeZone": "Europe/Berlin"
   },
   "runtimes": {
     "development-vm": {
@@ -169,6 +175,7 @@ courierctl watch nomadmade --raw
 courierctl resume nomadmade "Continue from the current recorded gate."
 courierctl migrate nomadmade
 courierctl artifacts nomadmade
+courierctl reference add nomadmade rust-tams-api@58c73d8
 courierctl attach nomadmade
 courierctl attach nomadmade --abort
 courierctl adopt existing-directory
@@ -192,7 +199,9 @@ trees, executables, or oversized files.
 
 `env shell` starts the workspace VM for an operator shell and stops it on exit. Rebuild and destroy require the workspace name as an explicit confirmation; both retain the host workspace files. `tunnel-command` prints an SSH local-forward command for a running VM and does not open a listener itself.
 
-When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. A compact `## Matrix update` bullet block is preferred and ends at the next heading or blank-line block boundary; legacy files fall back to the `Status`, `Current gate`, and `Updated` fields. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The same projection appears in periodic per-model usage reports; when it has not changed, Courier emits a one-line heartbeat instead of repeating it. Long delegated stages can emit a separate bounded progress heartbeat. Token totals are provider-reported processing totals and are broken down into input, cache reads/writes, and output so long-context cache activity is visible.
+When a profile enables `matrixUpdatesFromStatus`, Courier projects the workspace-contained `statusFile` instead of forwarding raw lead-agent turn text. Operator format expects `Finished:`, `Current:`, and `Next:` bullets in `## Matrix update`, with `Action needed:` only when intervention is required. Files outside the workspace, non-files, and files larger than 256 KiB are ignored. The periodic deadline is reset after an immediate status update, avoiding back-to-back messages while ensuring the run cannot stay silent longer than the configured interval. Capacity mode reports only relevant provider/model windows from the authentication broker, marks cached data stale after `capacityStaleSeconds`, and never substitutes inferred token counts.
+
+An exact local Git commit can be declared at start with `--reference <workspace>@<commit>` or added while the target is idle with `courierctl reference add`. Courier exports the commit to its state cache, exposes it to host OMP with `--add-dir`, mounts it read-only at the recorded `/references/...` path in an isolated VM, and writes provenance to the contracted workflow's `references.json`.
 
 ## Isolated E2E canary
 

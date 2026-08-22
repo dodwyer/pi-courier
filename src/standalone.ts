@@ -74,6 +74,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const control = new ControlServer(config, workers);
   try {
     await transports.connectAll();
+    await workers.recoverInterrupted();
     await control.start();
   } catch (err) {
     await workers.shutdown();
