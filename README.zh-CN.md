@@ -59,7 +59,7 @@ OMP 以所选工作区作为当前目录运行，因此报告、代码和其他�
 
 Courier 还可以把 OMP 活动转换为精简的运维视图，只显示 Finished、Current、Next 和可选的 Action needed。Operator 模式会在配置的间隔内至少发送一次更新；有意义的即时更新会重置计时，并可从 OMP 认证代理读取订阅容量剩余百分比，而不是根据 token 数量估算。旧的详细 token 视图仍然可用。设置 `hideToolCalls` 可避免在普通 Matrix 回复中显示原始工具名称和参数；需要协议级输出的运维人员仍可使用 `courierctl watch --raw`。
 
-启用 workflow contract 的 profile 会在运行开始时记录确定性的 schema-v2 身份，包括 profile 配置、prompt bundle、精确的角色/模型映射、runtime 镜像和工具链。身份变化会在产品工作开始前阻止恢复；`!migrate` 会启动新的 lead 会话，并只执行 ledger 对账。没有历史 contract 的旧运行仍可恢复。Courier 会机械地持久化 task envelope，并可在已接受任务边界消费原子 rotation packet，从而无需额外的“持久化”模型任务。
+启用 workflow contract 的 profile 会在运行开始时记录确定性的 schema-v2 身份，包括 profile 配置、prompt bundle、精确的角色/模型映射、runtime 镜像和工具链。身份变化会在产品工作开始前阻止恢复；`!migrate` 会启动新的 lead 会话，并只执行 ledger 对账。没有历史 contract 的旧运行仍可恢复。Courier 会机械地持久化 task envelope，并可在已接受任务边界消费原子 rotation packet，从而无需额外的“持久化”模型任务。Task-result 目录和文件会保留工作区 runtime 的 ACL 访问权限，因此隔离 VM 可以检查较大的委派输出，而无需让这些 artifact 对所有用户可读。
 
 ## 配置
 

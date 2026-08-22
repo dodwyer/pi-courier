@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -300,6 +300,27 @@ describe("RunReporter", () => {
       toolCallId: "task-long",
       results: [{ resolvedModel: "openai-codex/gpt-5.6-sol:xhigh" }],
     });
+    expect(statSync(taskResultDirectoryPath).mode & 0o777).toBe(0o770);
+    expect(statSync(join(taskResultDirectoryPath, files[0])).mode & 0o777).toBe(0o660);
+    reporter.close();
+  });
+
+  it("repairs a private task-result directory for the workspace runtime", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "courier-task-result-mode-test-"));
+    dirs.push(workspace);
+    const taskResultDirectoryPath = join(workspace, "task-results");
+    mkdirSync(taskResultDirectoryPath, { recursive: true, mode: 0o700 });
+    chmodSync(taskResultDirectoryPath, 0o700);
+
+    const reporter = new RunReporter({
+      intervalSeconds: 0,
+      readableProgress: false,
+      finalUsage: false,
+      taskResultDirectoryPath,
+      send: async () => {},
+    });
+
+    expect(statSync(taskResultDirectoryPath).mode & 0o777).toBe(0o770);
     reporter.close();
   });
 

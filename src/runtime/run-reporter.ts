@@ -124,6 +124,7 @@ export class RunReporter {
       const normalized = normalizedModel(model);
       if (normalized) this.usedModels.add(normalized);
     }
+    this.prepareTaskResultDirectory();
     this.taskResultSequence = existingTaskResultSequence(options.taskResultDirectoryPath);
     this.loadModelsFromTaskResults();
   }
@@ -597,7 +598,7 @@ export class RunReporter {
     const directory = this.options.taskResultDirectoryPath;
     if (!directory) return true;
     try {
-      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      this.prepareTaskResultDirectory();
       const normalized = values.map((value) => {
         const result = record(value) ?? {};
         return {
@@ -642,12 +643,24 @@ export class RunReporter {
         const sequence = String(++this.taskResultSequence).padStart(4, "0");
         target = path.join(directory, `${sequence}-${safeFilename(toolCallId)}.json`);
       } while (fs.existsSync(target));
-      fs.writeFileSync(target, serialized, { mode: 0o600, flag: "wx" });
+      fs.writeFileSync(target, serialized, { mode: 0o660, flag: "wx" });
+      fs.chmodSync(target, 0o660);
       return true;
     } catch {
       // Reporting artifacts are a mirror of the native task result. They must
       // never break the OMP RPC lifecycle if the workspace becomes read-only.
       return false;
+    }
+  }
+
+  private prepareTaskResultDirectory(): void {
+    const directory = this.options.taskResultDirectoryPath;
+    if (!directory) return;
+    try {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o770 });
+      fs.chmodSync(directory, 0o770);
+    } catch {
+      // Persistence reports the actionable failure when a task result arrives.
     }
   }
 

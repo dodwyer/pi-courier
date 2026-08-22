@@ -79,7 +79,9 @@ work; `!migrate` starts a clean lead session with a reconciliation-only prompt.
 Legacy runs without a captured identity remain resume-compatible. Contracted
 task envelopes are persisted mechanically, and an atomic rotation packet can
 start a fresh lead session at an accepted task boundary without a model-only
-"persistence" task.
+"persistence" task. Task-result directories and files retain workspace-runtime
+ACL access, so an isolated VM can inspect large delegated outputs without
+making those artifacts world-readable.
 
 ## Configuration
 
