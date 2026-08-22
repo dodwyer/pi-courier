@@ -113,12 +113,17 @@ describe("WorkspaceManager", () => {
     execFileSync("git", ["commit", "-m", "Add contract"], { cwd: source.path });
     const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source.path, encoding: "utf-8" }).trim();
     const target = manager.resolve("target-project");
+    const cacheRoot = join(state, "references");
+    const targetRoot = join(cacheRoot, target.name);
+    mkdirSync(targetRoot, { recursive: true, mode: 0o700 });
+    chmodSync(targetRoot, 0o700);
 
-    const snapshot = manager.createReferenceSnapshot(target, `source-project@${revision.slice(0, 12)}`, join(state, "references"));
+    const snapshot = manager.createReferenceSnapshot(target, `source-project@${revision.slice(0, 12)}`, cacheRoot);
 
     try {
       expect(snapshot.revision).toBe(revision);
       expect(snapshot.guestPath).toBe(`/references/source-project-${revision.slice(0, 12)}`);
+      expect(statSync(targetRoot).mode & 0o777).toBe(0o755);
       expect(readFileSync(join(snapshot.hostPath, "contract.txt"), "utf-8")).toBe("version one\n");
       expect(statSync(join(snapshot.hostPath, "contract.txt")).mode & 0o222).toBe(0);
       expect(() => manager.createReferenceSnapshot(target, "source-project@deadbee", join(state, "references")))

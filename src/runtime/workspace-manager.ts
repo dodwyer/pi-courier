@@ -162,8 +162,9 @@ export class WorkspaceManager {
     const targetRoot = path.resolve(cacheRoot, target.name);
     const hostPath = path.join(targetRoot, `${sourceName}-${revision}`);
     const guestPath = `/references/${sourceName}-${revision.slice(0, 12)}`;
+    fs.mkdirSync(targetRoot, { recursive: true, mode: 0o755 });
+    fs.chmodSync(targetRoot, 0o755);
     if (!fs.existsSync(hostPath)) {
-      fs.mkdirSync(targetRoot, { recursive: true, mode: 0o755 });
       const temporary = path.join(targetRoot, `.snapshot-${sourceName}-${process.pid}-${Date.now()}`);
       const archive = `${temporary}.tar`;
       try {
