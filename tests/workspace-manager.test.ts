@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -116,12 +116,19 @@ describe("WorkspaceManager", () => {
 
     const snapshot = manager.createReferenceSnapshot(target, `source-project@${revision.slice(0, 12)}`, join(state, "references"));
 
-    expect(snapshot.revision).toBe(revision);
-    expect(snapshot.guestPath).toBe(`/references/source-project-${revision.slice(0, 12)}`);
-    expect(readFileSync(join(snapshot.hostPath, "contract.txt"), "utf-8")).toBe("version one\n");
-    expect(statSync(join(snapshot.hostPath, "contract.txt")).mode & 0o222).toBe(0);
-    expect(() => manager.createReferenceSnapshot(target, "source-project@deadbee", join(state, "references")))
-      .toThrow(/not available locally/);
+    try {
+      expect(snapshot.revision).toBe(revision);
+      expect(snapshot.guestPath).toBe(`/references/source-project-${revision.slice(0, 12)}`);
+      expect(readFileSync(join(snapshot.hostPath, "contract.txt"), "utf-8")).toBe("version one\n");
+      expect(statSync(join(snapshot.hostPath, "contract.txt")).mode & 0o222).toBe(0);
+      expect(() => manager.createReferenceSnapshot(target, "source-project@deadbee", join(state, "references")))
+        .toThrow(/not available locally/);
+    } finally {
+      // The production cache intentionally remains immutable. Restore only
+      // this test-owned fixture so a non-root CI runner can remove its tempdir.
+      chmodSync(snapshot.hostPath, 0o755);
+      chmodSync(join(snapshot.hostPath, "contract.txt"), 0o644);
+    }
   });
 
   it("rejects unsafe or oversized brief references without creating a target", () => {
