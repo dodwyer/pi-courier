@@ -311,6 +311,9 @@ describe("RunReporter", () => {
     const taskResultDirectoryPath = join(workspace, "task-results");
     mkdirSync(taskResultDirectoryPath, { recursive: true, mode: 0o700 });
     chmodSync(taskResultDirectoryPath, 0o700);
+    const existingResult = join(taskResultDirectoryPath, "0001-existing.json");
+    writeFileSync(existingResult, "{}\n", { mode: 0o600 });
+    chmodSync(existingResult, 0o600);
 
     const reporter = new RunReporter({
       intervalSeconds: 0,
@@ -321,6 +324,7 @@ describe("RunReporter", () => {
     });
 
     expect(statSync(taskResultDirectoryPath).mode & 0o777).toBe(0o770);
+    expect(statSync(existingResult).mode & 0o777).toBe(0o660);
     reporter.close();
   });
 

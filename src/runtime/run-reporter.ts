@@ -659,6 +659,11 @@ export class RunReporter {
     try {
       fs.mkdirSync(directory, { recursive: true, mode: 0o770 });
       fs.chmodSync(directory, 0o770);
+      for (const name of fs.readdirSync(directory)) {
+        if (!name.endsWith(".json")) continue;
+        const target = path.join(directory, name);
+        if (fs.lstatSync(target).isFile()) fs.chmodSync(target, 0o660);
+      }
     } catch {
       // Persistence reports the actionable failure when a task result arrives.
     }
